@@ -1,4 +1,4 @@
-print("Importando bibliotecas... Aguarde...")
+print("\033[31m", "Importando bibliotecas... Aguarde...", "\033[0m")
 
 # === Bibliotecas padrão ===
 import os
@@ -11,6 +11,7 @@ from functools import partial
 
 # === Bibliotecas de terceiros ===
 import questionary
+from questionary import Style
 import numpy as np
 import geopandas as gpd
 from tqdm import tqdm
@@ -25,11 +26,8 @@ from rasterio.windows import Window
 from rasterio.mask import mask
 from rasterio.merge import merge
 
-# === Funções utilitárias ===
-
-def exibir_banner():
-    # Site:https://patorjk.com/software/taag/
-    cores_ansi = {
+# === Configurações de estilo ===
+cores_ansi = {
         "preto": "\033[30m",
         "vermelho": "\033[31m",
         "verde": "\033[32m",
@@ -42,6 +40,18 @@ def exibir_banner():
         "azul_claro": "\033[94m",
         "reset": "\033[0m"
     }
+
+estilo_personalizado_selecao = Style([
+    ("pointer", "bold fg:yellow"),
+    ("selected", "bold fg:white bg:blue"),
+    ("highlighted", "fg:yellow"),
+    ("answer", "bold fg:green"),
+])
+
+# === Funções utilitárias ===
+
+def exibir_banner():
+    # Site:https://patorjk.com/software/taag/
 
     cor_banner = cores_ansi["ciano"]  # <<< ALTERAR AQUI A COR
     reset = cores_ansi["reset"]
@@ -102,7 +112,7 @@ def selecionar_arquivo_com_extensoes(extensoes, pasta_inicial=".", mensagem="Sel
             return None
 
         titulo = f"{mensagem} (📁 {os.path.basename(pasta_atual) or '/'})"
-        escolha = questionary.select(titulo, choices=opcoes).ask()
+        escolha = questionary.select(titulo, choices=opcoes, style=estilo_personalizado_selecao).ask()
 
         if escolha is None:
             print("\n🔄 Operação cancelada. Reiniciando...\n")
@@ -199,7 +209,8 @@ def classificar_imagem_thread():
     tamanho_bloco = int(questionary.select(
         "Escolha o tamanho dos blocos (em pixels):",
         choices=["512", "1024", "2048", "4096"],
-        default=bloco_padrao
+        default=bloco_padrao, 
+        style=estilo_personalizado_selecao
     ).ask())
 
     if total_cores <= 2:
@@ -307,7 +318,8 @@ def classificar_imagem_pool():
     tamanho_bloco = int(questionary.select(
         "Escolha o tamanho dos blocos (em pixels):",
         choices=["512", "1024", "2048", "4096"],
-        default=bloco_padrao
+        default=bloco_padrao, 
+        style=estilo_personalizado_selecao
     ).ask())
 
     cpu_padrao = "100" if total_cores <= 2 else "85" if total_cores <= 4 else "60"
@@ -376,6 +388,8 @@ def classificar_imagem_pool():
     print(f"[📝] Relatório salvo como: {relatorio_saida}")
 
 def classificar_rasters_segmentados():
+    from time import time
+
     modelo_path = selecionar_arquivo_com_extensoes([".pkl"], mensagem="Selecione o modelo .pkl treinado:")
     raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione um dos rasters segmentados para definir a pasta:")
     pasta_segmentos = os.path.dirname(raster_exemplo)
@@ -391,11 +405,16 @@ def classificar_rasters_segmentados():
 
     modelo = load(modelo_path)
 
+    inicio_geral = time()
+    duracoes = []
+    arquivos_processados = 0
+    total = len(arquivos_tif)
+    pontos_estimativa = [int(total * 0.25), int(total * 0.5), int(total * 0.75)]
+
     for raster_entrada in tqdm(arquivos_tif, desc="Classificando imagens"):
         nome_base, extensao = os.path.splitext(os.path.basename(raster_entrada))
         raster_saida = os.path.join(pasta_saida, f"{nome_base}-classificado{extensao}")
 
-        # Verificar se a classificação já foi feita e o raster está completo
         if os.path.exists(raster_saida):
             try:
                 with rasterio.open(raster_entrada) as src_in, rasterio.open(raster_saida) as src_out:
@@ -403,7 +422,9 @@ def classificar_rasters_segmentados():
                         print(f"[⏩] Pulando '{nome_base}' (já classificado e completo)")
                         continue
             except:
-                pass  # Se não puder abrir, tenta classificar de novo
+                pass
+
+        inicio = time()
 
         with rasterio.open(raster_entrada) as src:
             profile = src.profile.copy()
@@ -423,7 +444,19 @@ def classificar_rasters_segmentados():
             with rasterio.open(raster_saida, 'w', **profile) as dst:
                 dst.write(matriz_saida, 1)
 
+        fim = time()
+        duracoes.append(fim - inicio)
+        arquivos_processados += 1
+
+        if arquivos_processados in pontos_estimativa and duracoes:
+            tempo_medio = sum(duracoes) / len(duracoes)
+            restantes = total - arquivos_processados
+            estimado = tempo_medio * restantes
+            print(f"⏱️ Estimativa atualizada ({int(arquivos_processados / total * 100)}%): {estimado:.2f} segundos (~{estimado/60:.1f} min)")
+
+    tempo_total = time() - inicio_geral
     print(f"[✔] Classificação concluída. Resultados salvos em: {pasta_saida}")
+    print(f"[⏱️] Tempo total decorrido: {tempo_total:.2f} segundos (~{tempo_total/60:.1f} min)")
 
 def remover_banda_4():
     nome_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o arquivo TIFF (ex: imagem.tif):")
@@ -478,13 +511,15 @@ def comparar_rasters():
         salvar_relatorio = questionary.select(
             "Deseja salvar o relatório da comparação?",
             choices=["Sim", "Não"],
-            default="Sim"
+            default="Sim", 
+            style=estilo_personalizado_selecao
         ).ask() == "Sim"
 
         salvar_raster_diferencas = questionary.select(
             "Deseja gerar o raster de diferenças?",
             choices=["Sim", "Não"],
-            default="Sim"
+            default="Sim", 
+            style=estilo_personalizado_selecao
         ).ask() == "Sim"
 
         if salvar_relatorio:
@@ -705,7 +740,8 @@ def menu():
                 "🖼️ Comparar rasters",
                 "🧹 Remover banda 4 (imagem RGB)",
                 "🧹 Limpar prompt",
-                "❌ Sair"]
+                "❌ Sair"],
+                style=estilo_personalizado_selecao
         ).ask()
 
         if opcao == "🧠 Treinar modelo":
