@@ -1,4 +1,4 @@
-print("\033[31m", "Importando bibliotecas... Aguarde...", "\033[0m")
+print("\033[36m", "Importando bibliotecas... Aguarde...", "\033[0m")
 
 # === Bibliotecas padrão ===
 import os
@@ -7,24 +7,27 @@ import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import multiprocessing as mp
-from functools import partial
 
 # === Bibliotecas de terceiros ===
-import questionary
-from questionary import Style
 import numpy as np
 import geopandas as gpd
-from tqdm import tqdm
+import questionary
+from questionary import Style
 from joblib import dump, load
+from tqdm import tqdm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.utils import resample
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 from scipy.ndimage import generic_filter
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 # === Raster e geoprocessamento ===
 import rasterio
 from rasterio.windows import Window
 from rasterio.mask import mask
 from rasterio.merge import merge
+from rasterio.features import rasterize
 
 # === Configurações de estilo ===
 cores_ansi = {
@@ -720,55 +723,175 @@ def aplicar_filtro_modo():
 
     print(f"[✔] Filtro de modo aplicado. Raster salvo como: {saida_path}")
 
+def gerar_matriz_confusao_raster():
+    print("[📊] Gerar matriz de confusão entre raster de referência e classificado")
+    raster_ref = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster de referência (verdade do terreno):")
+    raster_pred = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado (modelo predito):")
+
+    with rasterio.open(raster_ref) as ref, rasterio.open(raster_pred) as pred:
+        if ref.shape != pred.shape or ref.transform != pred.transform:
+            print("[❌] Os rasters não têm a mesma dimensão ou alinhamento espacial.")
+            return
+
+        ref_array = ref.read(1)
+        pred_array = pred.read(1)
+        nodata_ref = ref.nodata
+        nodata_pred = pred.nodata
+
+        mask_valid = np.ones(ref_array.shape, dtype=bool)
+        if nodata_ref is not None:
+            mask_valid &= ref_array != nodata_ref
+        if nodata_pred is not None:
+            mask_valid &= pred_array != nodata_pred
+
+        y_true = ref_array[mask_valid].flatten()
+        y_pred = pred_array[mask_valid].flatten()
+
+        if len(y_true) == 0:
+            print("[⚠] Nenhum pixel válido para comparação.")
+            return
+
+        labels = sorted(np.unique(np.concatenate([y_true, y_pred])))
+        matriz = confusion_matrix(y_true, y_pred, labels=labels)
+        acuracia = accuracy_score(y_true, y_pred)
+        relatorio = classification_report(y_true, y_pred, labels=labels, output_dict=True)
+
+        print("\n[✅] Matriz de Confusão:")
+        print(matriz)
+        print(f"\n[🎯] Acurácia Global: {acuracia:.4f} ({acuracia*100:.2f}%)")
+        print("\n[🧾] Acurácia por Classe:")
+        for label in labels:
+            acc_label = relatorio[str(label)]['recall']
+            print(f"Classe {label}: {acc_label:.4f} ({acc_label*100:.2f}%)")
+
+        print("\n[🧾] Relatório de Classificação:")
+        print(classification_report(y_true, y_pred, labels=labels))
+
+        data_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nome_saida = f"matriz_confusao_{data_str}.txt"
+        with open(nome_saida, "w", encoding="utf-8") as f:
+            f.write("MATRIZ DE CONFUSÃO\n")
+            f.write(f"Referência: {raster_ref}\n")
+            f.write(f"Classificado: {raster_pred}\n")
+            f.write(f"Data: {datetime.now()}\n\n")
+            f.write("Classes analisadas: " + ", ".join(map(str, labels)) + "\n\n")
+            f.write(str(matriz))
+            f.write(f"\n\nAcurácia Global: {acuracia:.4f} ({acuracia*100:.2f}%)\n")
+            f.write("\nAcurácia por Classe:\n")
+            for label in labels:
+                acc_label = relatorio[str(label)]['recall']
+                f.write(f"Classe {label}: {acc_label:.4f} ({acc_label*100:.2f}%)\n")
+            f.write("\nRELATÓRIO:\n")
+            f.write(classification_report(y_true, y_pred, labels=labels))
+
+        print(f"\n[💾] Relatório salvo como: {nome_saida}")
+
+def gerar_matriz_confusao_vetor():
+    print("[📊] Gerar matriz de confusão com base em vetor de amostras")
+    raster_pred = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado (modelo predito):")
+    vetor_ref = selecionar_arquivo_com_extensoes([".gpkg"], mensagem="Selecione o arquivo de amostras (GPKG):")
+    campo_classe = questionary.text("Nome do campo de classe no vetor:").ask()
+
+    with rasterio.open(raster_pred) as src:
+        perfil = src.profile
+        transform = src.transform
+        shape = src.shape
+        pred_array = src.read(1)
+        nodata_pred = src.nodata
+
+    gdf = gpd.read_file(vetor_ref)
+    gdf = gdf[[campo_classe, "geometry"]].dropna(subset=["geometry"])
+
+    shapes = ((geom, value) for geom, value in zip(gdf.geometry, gdf[campo_classe]))
+    ref_array = rasterize(
+        shapes=shapes,
+        out_shape=shape,
+        transform=transform,
+        fill=-9999,
+        dtype="int32"
+    )
+
+    mask_valid = (ref_array != -9999)
+    if nodata_pred is not None:
+        mask_valid &= pred_array != nodata_pred
+
+    y_true = ref_array[mask_valid].flatten()
+    y_pred = pred_array[mask_valid].flatten()
+
+    if len(y_true) == 0:
+        print("[⚠] Nenhum pixel válido para comparação.")
+        return
+
+    labels = sorted(np.unique(np.concatenate([y_true, y_pred])))
+    matriz = confusion_matrix(y_true, y_pred, labels=labels)
+    acuracia = accuracy_score(y_true, y_pred)
+    relatorio = classification_report(y_true, y_pred, labels=labels, output_dict=True)
+
+    print("\n[✅] Matriz de Confusão:")
+    print(matriz)
+    print(f"\n[🎯] Acurácia Global: {acuracia:.4f} ({acuracia*100:.2f}%)")
+    print("\n[🧾] Acurácia por Classe:")
+    for label in labels:
+        acc_label = relatorio[str(label)]['recall']
+        print(f"Classe {label}: {acc_label:.4f} ({acc_label*100:.2f}%)")
+
+    print("\n[🧾] Relatório de Classificação:")
+    print(classification_report(y_true, y_pred, labels=labels))
+
+    data_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nome_saida = f"matriz_confusao_vetor_{data_str}.txt"
+    with open(nome_saida, "w", encoding="utf-8") as f:
+        f.write("MATRIZ DE CONFUSÃO - REFERÊNCIA VETORIAL\n")
+        f.write(f"Raster classificado: {raster_pred}\n")
+        f.write(f"Vetor referência: {vetor_ref}\n")
+        f.write(f"Campo de classe: {campo_classe}\n")
+        f.write(f"Data: {datetime.now()}\n\n")
+        f.write("Classes analisadas: " + ", ".join(map(str, labels)) + "\n\n")
+        f.write(str(matriz))
+        f.write(f"\n\nAcurácia Global: {acuracia:.4f} ({acuracia*100:.2f}%)\n")
+        f.write("\nAcurácia por Classe:\n")
+        for label in labels:
+            acc_label = relatorio[str(label)]['recall']
+            f.write(f"Classe {label}: {acc_label:.4f} ({acc_label*100:.2f}%)\n")
+        f.write("\nRELATÓRIO:\n")
+        f.write(classification_report(y_true, y_pred, labels=labels))
+
+    print(f"\n[💾] Relatório salvo como: {nome_saida}")
+
 # === Menu principal ===
 def menu():
-    exibir_banner()
-    Limpar()
+    opcoes = [
+        ("🧠 Treinar modelo", treinar_modelo),
+        ("🧮 Classificar raster (Threads - Modelos leves)", classificar_imagem_thread),
+        ("🧮 Classificar raster (Process - Modelos pesados)", classificar_imagem_pool),
+        ("🧮 Classificar raster em GRUPO", classificar_rasters_segmentados),
+        ("🧼 Limpar ruído", aplicar_filtro_modo),
+        ("🧩 Segmentar rasters", segmentar_raster_em_blocos),
+        ("🧩 Unificar rasters", unir_rasters_em_mosaico),
+        ("🔎 Analisar raster", analisar_raster),
+        ("🖼️ Comparar rasters", comparar_rasters),
+        ("📊 Matriz de confusão (Raster x Raster)", gerar_matriz_confusao_raster),
+        ("📊 Matriz de confusão (Raster x Vetor)", gerar_matriz_confusao_vetor),
+        ("🧹 Remover banda 4 (imagem RGB)", remover_banda_4),
+        ("🧹 Limpar prompt", Limpar),
+        ("❌ Sair", None)
+    ]
+
     while True:
         print("\n")
-        opcao = questionary.select(
+        escolha = questionary.select(
             "Escolha uma ação:",
-            choices=[
-                "🧠 Treinar modelo",
-                "🧮 Classificar raster (Threads - Modelos leves)",
-                "🧮 Classificar raster (Process - Modelos pesados)",
-                "🧮 Classificar raster em GRUPO",
-                "🧼 Limpar ruído",
-                "🧩 Segmentar rasters",
-                "🧩 Unificar rasters",
-                "🔎 Analisar raster",
-                "🖼️ Comparar rasters",
-                "🧹 Remover banda 4 (imagem RGB)",
-                "🧹 Limpar prompt",
-                "❌ Sair"],
-                style=estilo_personalizado_selecao
+            choices=[texto for texto, _ in opcoes],
+            style=estilo_personalizado_selecao
         ).ask()
 
-        if opcao == "🧠 Treinar modelo":
-            treinar_modelo()
-        elif opcao == "🧮 Classificar raster (Threads - Modelos leves)":
-            classificar_imagem_thread()
-        elif opcao == "🧮 Classificar raster (Process - Modelos pesados)":
-            classificar_imagem_pool()
-        elif opcao == "🧮 Classificar raster em GRUPO":
-            classificar_rasters_segmentados()
-        elif opcao == "🧼 Limpar ruído":
-            aplicar_filtro_modo()
-        elif opcao == "🧩 Segmentar rasters":
-            segmentar_raster_em_blocos()
-        elif opcao == "🧩 Unificar rasters":
-            unir_rasters_em_mosaico()
-        elif opcao == "🔎 Analisar raster":
-            analisar_raster()
-        elif opcao == "🖼️ Comparar rasters":
-            comparar_rasters()
-        elif opcao == "🧹 Remover banda 4 (imagem RGB)":
-            remover_banda_4()
-        elif opcao == "🧹 Limpar prompt":
-            Limpar()
-        elif opcao == "❌ Sair":
-            os.system('cls' if os.name == 'nt' else 'clear')
-            break
+        for texto, funcao in opcoes:
+            if escolha == texto:
+                if funcao is None:
+                    os.system('cls' if os.name == 'nt' else 'clear')
+                    return
+                funcao()
+                break
 
 if __name__ == "__main__":
     menu()
