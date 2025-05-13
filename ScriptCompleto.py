@@ -1,5 +1,3 @@
-print("\033[36m", "Importando bibliotecas... Aguarde...", "\033[0m")
-
 # === Bibliotecas padrão ===
 import os
 import sys
@@ -17,10 +15,7 @@ from joblib import dump, load
 from tqdm import tqdm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.utils import resample
-from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 from scipy.ndimage import generic_filter
-import seaborn as sns
-import matplotlib.pyplot as plt
 
 # === Raster e geoprocessamento ===
 import rasterio
@@ -130,12 +125,6 @@ def selecionar_arquivo_com_extensoes(extensoes, pasta_inicial=".", mensagem="Sel
         else:
             return os.path.join(pasta_atual, escolha)
     
-def listar_arquivos(extensoes):
-    arquivos = [f for f in os.listdir('.') if os.path.isfile(f) and any(f.lower().endswith(ext) for ext in extensoes)]
-    if not arquivos:
-        raise FileNotFoundError(f"Nenhum arquivo encontrado com as extensões: {', '.join(extensoes)}")
-    return arquivos
-
 def Limpar():
     os.system('cls' if os.name == 'nt' else 'clear')
     exibir_banner()
@@ -150,10 +139,21 @@ def treinar_modelo():
     n_arvores = int(questionary.text("Número de árvores no modelo Random Forest:").ask())
 
     nome_sugerido = f"{nome_raster}-N{n_arvores}-modelo"
-    modelo_saida = questionary.text("Nome do arquivo de saída para o modelo (sem extensão):", default=nome_sugerido).ask()
+    modelo_saida_nome = questionary.text("Nome do arquivo de saída para o modelo (sem extensão):", default=nome_sugerido).ask()
+    if not modelo_saida_nome.lower().endswith(".pkl"):
+        modelo_saida_nome += ".pkl"
 
-    if not modelo_saida.lower().endswith(".pkl"):
-        modelo_saida += ".pkl"
+    # Pasta padrão para salvar o modelo
+    pasta_padrao = os.path.join(os.path.dirname(__file__), "Modelos treinados")
+    os.makedirs(pasta_padrao, exist_ok=True)
+
+    salvar_em_padrao = questionary.confirm(f"Deseja salvar o modelo na pasta padrão? ({pasta_padrao})", default=True).ask()
+    if salvar_em_padrao:
+        caminho_modelo = os.path.join(pasta_padrao, modelo_saida_nome)
+    else:
+        pasta_customizada = questionary.path("Selecione a pasta onde deseja salvar o modelo:").ask()
+        os.makedirs(pasta_customizada, exist_ok=True)
+        caminho_modelo = os.path.join(pasta_customizada, modelo_saida_nome)
 
     print("[1] Iniciando carregamento das amostras vetoriais...")
     gdf = gpd.read_file(vetor_amostras)
@@ -191,9 +191,10 @@ def treinar_modelo():
     print("[3] Treinando modelo Random Forest...")
     clf = RandomForestClassifier(n_estimators=n_arvores, n_jobs=-1)
     clf.fit(X, y)
-    dump(clf, modelo_saida)
-    print(f"[✔] Modelo salvo: {modelo_saida}")
+    dump(clf, caminho_modelo)
+    print(f"[✔] Modelo salvo com sucesso: {caminho_modelo}")
 
+## === Calssificação de imagens ===
 def classificar_imagem_thread():
     modelo_path = selecionar_arquivo_com_extensoes([".pkl"], mensagem="Selecione o modelo .pkl treinado:")
     raster_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster a ser classificado (TIF):")
@@ -554,11 +555,28 @@ def comparar_rasters():
 
 def segmentar_raster_em_blocos():
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster a ser segmentado:")
-    bloco_pixels = int(questionary.text("Tamanho dos blocos (em pixels, ex: 1000):", default="1000").ask())
+
+    escolhas = ["512", "1024", "2048", "4096", "🔧 Personalizado"]
+    escolha = questionary.select(
+        "Escolha o tamanho dos blocos (em pixels):",
+        choices=escolhas,
+        default="2048",
+        style=estilo_personalizado_selecao
+    ).ask()
+
+    if escolha == "🔧 Personalizado":
+        while True:
+            valor_manual = questionary.text("Digite o tamanho do bloco em pixels (ex: 1000):").ask()
+            if valor_manual.isdigit() and int(valor_manual) > 0:
+                bloco_pixels = int(valor_manual)
+                break
+            else:
+                print("❌ Valor inválido. Digite um número inteiro positivo.")
+    else:
+        bloco_pixels = int(escolha)
 
     nome_base = os.path.splitext(os.path.basename(raster_path))[0]
     pasta_saida = os.path.join(os.path.dirname(raster_path), f"{nome_base}_segmentos")
-
     os.makedirs(pasta_saida, exist_ok=True)
 
     with rasterio.open(raster_path) as src:
@@ -724,6 +742,8 @@ def aplicar_filtro_modo():
     print(f"[✔] Filtro de modo aplicado. Raster salvo como: {saida_path}")
 
 def gerar_matriz_confusao_raster():
+    from sklearn.metrics import confusion_matrix, classification_report, accuracy_score # Importado na função para deixar o inicio mais leve
+
     print("[📊] Gerar matriz de confusão entre raster de referência e classificado")
     raster_ref = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster de referência (verdade do terreno):")
     raster_pred = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado (modelo predito):")
@@ -860,6 +880,7 @@ def gerar_matriz_confusao_vetor():
 
 # === Menu principal ===
 def menu():
+    exibir_banner()
     opcoes = [
         ("🧠 Treinar modelo", treinar_modelo),
         ("🧮 Classificar raster (Threads - Modelos leves)", classificar_imagem_thread),
