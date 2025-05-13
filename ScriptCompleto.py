@@ -1,9 +1,13 @@
+print("Importando bibliotecas... Aguarde...")
+
 # === Bibliotecas padrão ===
 import os
 import sys
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import multiprocessing as mp
+from functools import partial
 
 # === Bibliotecas de terceiros ===
 import questionary
@@ -13,17 +17,13 @@ from tqdm import tqdm
 from joblib import dump, load
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.utils import resample
+from scipy.ndimage import generic_filter
 
 # === Raster e geoprocessamento ===
 import rasterio
 from rasterio.windows import Window
 from rasterio.mask import mask
 from rasterio.merge import merge
-
-
-import multiprocessing as mp
-from scipy.ndimage import generic_filter
-from functools import partial
 
 # === Funções utilitárias ===
 
@@ -628,6 +628,17 @@ def modo_local(pixels, nodata):
         return nodata if nodata is not None else 0
     return np.bincount(valores.astype(int)).argmax()
 
+def processar_bloco_vertical(args):
+    array, start, end, nodata, tamanho_janela = args
+    bloco = array[start:end, :]
+    filtrado = generic_filter(
+        bloco,
+        lambda p: modo_local(p, nodata),
+        size=tamanho_janela,
+        mode='nearest'
+    )
+    return (start, filtrado)
+
 def aplicar_filtro_modo():
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado para aplicar o filtro de modo:")
     tamanho_janela = int(questionary.text("Tamanho da janela (ímpar, ex: 3, 5, 7):", default="3").ask())
@@ -641,12 +652,30 @@ def aplicar_filtro_modo():
         profile = src.profile.copy()
         nodata = src.nodata
 
-    print("[🔄] Aplicando filtro de modo com barra de progresso...")
-    linhas, colunas = array.shape
+    altura, largura = array.shape
+
+    total_cores = mp.cpu_count()
+    cpu_padrao = "100" if total_cores <= 2 else "85" if total_cores <= 4 else "60"
+
+    print("\n⚙️  Defina o uso da CPU para paralelismo do filtro de modo")
+    uso_cpu_percentual = int(questionary.text(f"Quantos % da CPU deseja utilizar? (ex: {cpu_padrao})", default=cpu_padrao).ask())
+    uso_cpu_percentual = max(1, min(100, uso_cpu_percentual))
+    n_processos = max(1, int((uso_cpu_percentual / 100) * total_cores))
+
+    print(f"[🔄] Aplicando filtro de modo 2D por blocos com {n_processos} processo(s)...")
+
+    bloco_altura = 256  # Ajustável: número de linhas por bloco
+    blocos = []
+    for i in range(0, altura, bloco_altura):
+        inicio = i
+        fim = min(i + bloco_altura, altura)
+        blocos.append((array, inicio, fim, nodata, tamanho_janela))
+
     array_filtrado = np.zeros_like(array)
 
-    for i in tqdm(range(linhas), desc="Filtrando linhas"):
-        array_filtrado[i, :] = generic_filter(array[i:i+1, :], lambda p: modo_local(p, nodata), size=(1, tamanho_janela), mode='nearest')[0]
+    with mp.Pool(processes=n_processos) as pool:
+        for inicio, resultado in tqdm(pool.imap(processar_bloco_vertical, blocos), total=len(blocos), desc="Filtrando blocos"):
+            array_filtrado[inicio:inicio+resultado.shape[0], :] = resultado
 
     nome_base, extensao = os.path.splitext(os.path.basename(raster_path))
     saida_path = os.path.join(os.path.dirname(raster_path), f"{nome_base}_modo{tamanho_janela}{extensao}")
