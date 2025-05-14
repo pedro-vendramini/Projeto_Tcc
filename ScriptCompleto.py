@@ -17,21 +17,12 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.utils import resample
 from scipy.ndimage import generic_filter
 
-# === Raster e geoprocessamento ===
+# === Bibliotecas específicas de geoprocessamento ===
 import rasterio
 from rasterio.windows import Window
 from rasterio.mask import mask
 from rasterio.merge import merge
 from rasterio.features import rasterize
-
-import os
-import time
-import sys
-import numpy as np
-import rasterio
-import questionary
-from joblib import load
-from tqdm import tqdm
 
 
 # === Configurações de estilo ===
@@ -57,7 +48,6 @@ estilo_personalizado_selecao = Style([
 ])
 
 # === Funções utilitárias ===
-
 def exibir_banner():
     # Site:https://patorjk.com/software/taag/
 
@@ -85,8 +75,31 @@ def exibir_banner():
                 pedrovendramini.eng@gmail.com
         -----------------------------------------------
     """
+    
+    banner3 = r"""
+    ╔════════════════════════════════════════════╗
+    ║   CLASSIFICAÇÃO DE USO E OCUPAÇÃO DO SOLO  ║
+    ║     Modelo Random Forest aplicado via      ║
+    ║             Python + Rasterio              ║
+    ╠════════════════════════════════════════════╣
+    ║ Universidade Federal de Roraima – UFRR     ║
+    ║ Engenharia Civil – TCC                     ║
+    ║ Autor: Pedro Aguiar Vendramini             ║
+    ║ Contato: pedrovendramini.eng@gmail.com     ║
+    ╚════════════════════════════════════════════╝
+    """
 
-    banner = banner2
+    banner4 = r"""
+    ===========================================================
+    CLASSIFICAÇÃO DE RASTERS - RANDOM FOREST - TCC UFRR
+    ===========================================================
+    Autor : Pedro Aguiar Vendramini
+    Curso : Engenharia Civil - Universidade Federal de Roraima
+    Email : pedrovendramini.eng@gmail.com
+    ===========================================================
+    """
+
+    banner = banner3
     print(cor_banner + banner + reset)
  
 def selecionar_arquivo_com_extensoes(extensoes, pasta_inicial=".", mensagem="Selecione um arquivo:"):
@@ -403,17 +416,6 @@ def classificar_imagem_pool():
 
 ### Classificação de imagem em grupo - inicio
 
-import os
-import time
-import numpy as np
-import rasterio
-import questionary
-from joblib import load
-
-def Limpar():
-    os.system('cls' if os.name == 'nt' else 'clear')
-    exibir_banner()
-
 def classificar_rasters_segmentados():
     modelo_path = selecionar_arquivo_com_extensoes([".pkl"], mensagem="Selecione o modelo .pkl treinado:")
     raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione um dos rasters segmentados para definir a pasta:")
@@ -498,7 +500,6 @@ def classificar_rasters_segmentados():
     print(f"[📂] Resultados salvos em: {pasta_saida}")
     print(f"[📄] Log salvo em: {caminho_log}")
     print(f"[⏱️] Tempo total decorrido: {tempo_total:.2f} segundos (~{tempo_total/60:.1f} min)")
-
 
 ### Classificação de imagem em grupo - inicio
 
