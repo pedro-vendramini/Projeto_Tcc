@@ -24,6 +24,16 @@ from rasterio.mask import mask
 from rasterio.merge import merge
 from rasterio.features import rasterize
 
+import os
+import time
+import sys
+import numpy as np
+import rasterio
+import questionary
+from joblib import load
+from tqdm import tqdm
+
+
 # === Configurações de estilo ===
 cores_ansi = {
         "preto": "\033[30m",
@@ -391,9 +401,20 @@ def classificar_imagem_pool():
 
     print(f"[📝] Relatório salvo como: {relatorio_saida}")
 
-def classificar_rasters_segmentados():
-    from time import time
+### Classificação de imagem em grupo - inicio
 
+import os
+import time
+import numpy as np
+import rasterio
+import questionary
+from joblib import load
+
+def Limpar():
+    os.system('cls' if os.name == 'nt' else 'clear')
+    exibir_banner()
+
+def classificar_rasters_segmentados():
     modelo_path = selecionar_arquivo_com_extensoes([".pkl"], mensagem="Selecione o modelo .pkl treinado:")
     raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione um dos rasters segmentados para definir a pasta:")
     pasta_segmentos = os.path.dirname(raster_exemplo)
@@ -404,31 +425,32 @@ def classificar_rasters_segmentados():
     pasta_saida = os.path.join(os.path.dirname(pasta_segmentos), nome_final)
     os.makedirs(pasta_saida, exist_ok=True)
 
-    print(f"[📂] Classificando {len(arquivos_tif)} rasters na pasta: {pasta_segmentos}")
-    print(f"[🧠] Usando modelo: {modelo_path}")
+    # Caminho do log
+    caminho_log = os.path.join(pasta_saida, "classificados.log")
+
+    # Lê o log existente se houver
+    classificados_existentes = set()
+    if os.path.exists(caminho_log):
+        with open(caminho_log, "r", encoding="utf-8") as f:
+            classificados_existentes = set(linha.strip() for linha in f if linha.strip())
 
     modelo = load(modelo_path)
-
-    inicio_geral = time()
+    inicio_geral = time.time()
     duracoes = []
     arquivos_processados = 0
     total = len(arquivos_tif)
-    pontos_estimativa = [int(total * 0.25), int(total * 0.5), int(total * 0.75)]
 
-    for raster_entrada in tqdm(arquivos_tif, desc="Classificando imagens"):
+    for idx, raster_entrada in enumerate(arquivos_tif):
         nome_base, extensao = os.path.splitext(os.path.basename(raster_entrada))
-        raster_saida = os.path.join(pasta_saida, f"{nome_base}-classificado{extensao}")
+        nome_saida = f"{nome_base}-classificado{extensao}"
+        raster_saida = os.path.join(pasta_saida, nome_saida)
 
-        if os.path.exists(raster_saida):
-            try:
-                with rasterio.open(raster_entrada) as src_in, rasterio.open(raster_saida) as src_out:
-                    if src_in.shape == src_out.shape:
-                        print(f"[⏩] Pulando '{nome_base}' (já classificado e completo)")
-                        continue
-            except:
-                pass
+        # Se já estiver no log, pula
+        if nome_saida in classificados_existentes:
+            arquivos_processados += 1
+            continue
 
-        inicio = time()
+        inicio = time.time()
 
         with rasterio.open(raster_entrada) as src:
             profile = src.profile.copy()
@@ -436,31 +458,49 @@ def classificar_rasters_segmentados():
             largura, altura = src.width, src.height
             nodata = src.nodata
 
-            bloco = src.read()
-            bloco = bloco.transpose(1, 2, 0)
+            bloco = src.read().transpose(1, 2, 0)
             mascara_valida = ~np.any(bloco == nodata, axis=2)
             matriz_saida = np.zeros((altura, largura), dtype='uint8')
+
             if np.any(mascara_valida):
-                bloco_2d = bloco[mascara_valida]
-                previsoes = modelo.predict(bloco_2d)
+                previsoes = modelo.predict(bloco[mascara_valida])
                 matriz_saida[mascara_valida] = previsoes.astype('uint8')
 
             with rasterio.open(raster_saida, 'w', **profile) as dst:
                 dst.write(matriz_saida, 1)
 
-        fim = time()
+        fim = time.time()
         duracoes.append(fim - inicio)
         arquivos_processados += 1
 
-        if arquivos_processados in pontos_estimativa and duracoes:
-            tempo_medio = sum(duracoes) / len(duracoes)
-            restantes = total - arquivos_processados
-            estimado = tempo_medio * restantes
-            print(f"⏱️ Estimativa atualizada ({int(arquivos_processados / total * 100)}%): {estimado:.2f} segundos (~{estimado/60:.1f} min)")
+        # Atualiza o log
+        with open(caminho_log, "a", encoding="utf-8") as f:
+            f.write(nome_saida + "\n")
 
-    tempo_total = time() - inicio_geral
-    print(f"[✔] Classificação concluída. Resultados salvos em: {pasta_saida}")
+        # Cálculos de tempo
+        tempo_decorrido = fim - inicio_geral
+        tempo_medio = sum(duracoes) / len(duracoes)
+        restantes = total - arquivos_processados
+        estimativa_restante = tempo_medio * restantes
+        tempo_estimado_total = tempo_decorrido + estimativa_restante
+        percentual = (arquivos_processados / total) * 100
+
+        # Atualiza a tela
+        Limpar()
+        print(f"[🧠] Processamento de rasters segmentado (📁 {os.path.basename(pasta_segmentos)})")
+        print(f"    Processado {arquivos_processados}/{total} rasters ({percentual:.1f}%)")
+        print(f"    Tempo decorrido: {int(tempo_decorrido)}s ({tempo_decorrido/60:.1f}m)")
+        print(f"    Tempo estimado até concluir: {int(estimativa_restante)}s ({estimativa_restante/60:.1f}m)")
+        print(f"    Tempo total estimado: {int(tempo_estimado_total)}s ({tempo_estimado_total/60:.1f}m)\n")
+
+    tempo_total = time.time() - inicio_geral
+    print("[✔] Classificação concluída.")
+    print(f"[📂] Resultados salvos em: {pasta_saida}")
+    print(f"[📄] Log salvo em: {caminho_log}")
     print(f"[⏱️] Tempo total decorrido: {tempo_total:.2f} segundos (~{tempo_total/60:.1f} min)")
+
+
+### Classificação de imagem em grupo - inicio
 
 def remover_banda_4():
     nome_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o arquivo TIFF (ex: imagem.tif):")
@@ -556,27 +596,35 @@ def comparar_rasters():
 def segmentar_raster_em_blocos():
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster a ser segmentado:")
 
-    escolhas = ["512", "1024", "2048", "4096", "🔧 Personalizado"]
-    escolha = questionary.select(
-        "Escolha o tamanho dos blocos (em pixels):",
-        choices=escolhas,
-        default="2048",
-        style=estilo_personalizado_selecao
-    ).ask()
+    opcoes = [
+        questionary.Choice(title="256", value=256),
+        questionary.Choice(title="512", value=512),
+        questionary.Choice(title="1024", value=1024),
+        questionary.Choice(title="2048 (padrão)", value=2048),
+        questionary.Choice(title="4096", value=4096),
+        questionary.Choice(title="🔧 Inserir valor personalizado", value="custom")
+    ]
 
-    if escolha == "🔧 Personalizado":
+    escolha = questionary.select("🔧 Escolha o tamanho do bloco (em pixels):", choices=opcoes, default=2048).ask()
+
+    if escolha == "custom":
         while True:
-            valor_manual = questionary.text("Digite o tamanho do bloco em pixels (ex: 1000):").ask()
-            if valor_manual.isdigit() and int(valor_manual) > 0:
-                bloco_pixels = int(valor_manual)
-                break
-            else:
-                print("❌ Valor inválido. Digite um número inteiro positivo.")
+            try:
+                bloco_pixels = int(questionary.text("Digite o tamanho do bloco (em pixels):", default="2048").ask())
+                if bloco_pixels > 0:
+                    break
+                else:
+                    print("[⚠] Por favor, insira um valor positivo.")
+            except ValueError:
+                print("[⚠] Valor inválido, tente novamente.")
     else:
-        bloco_pixels = int(escolha)
+        bloco_pixels = escolha
 
     nome_base = os.path.splitext(os.path.basename(raster_path))[0]
-    pasta_saida = os.path.join(os.path.dirname(raster_path), f"{nome_base}_segmentos")
+    pasta_saida = os.path.join(
+        os.path.dirname(raster_path),
+        f"{nome_base}-segmentado-{bloco_pixels}"
+    )
     os.makedirs(pasta_saida, exist_ok=True)
 
     with rasterio.open(raster_path) as src:
