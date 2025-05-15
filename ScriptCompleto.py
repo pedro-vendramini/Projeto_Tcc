@@ -287,7 +287,7 @@ def classificar_imagem_thread():
         def classificar_bloco(args):
             window, bloco, nodata = args
             bloco = bloco.transpose(1, 2, 0)
-            mascara_valida = ~np.any(bloco == nodata, axis=2)
+            mascara_valida = ~(np.all(bloco == 0, axis=2))
             matriz_saida = np.zeros((bloco.shape[0], bloco.shape[1]), dtype='uint8')
             if np.any(mascara_valida):
                 bloco_2d = bloco[mascara_valida]
@@ -324,7 +324,7 @@ def classificar_bloco_serializado(args):
     import pickle
     modelo = pickle.loads(modelo_bytes)
     bloco = bloco.transpose(1, 2, 0)
-    mascara_valida = ~np.any(bloco == nodata, axis=2)
+    mascara_valida = ~(np.all(bloco == 0, axis=2))
     matriz_saida = np.zeros((bloco.shape[0], bloco.shape[1]), dtype='uint8')
     if np.any(mascara_valida):
         bloco_2d = bloco[mascara_valida]
@@ -461,7 +461,7 @@ def classificar_rasters_segmentados():
             nodata = src.nodata
 
             bloco = src.read().transpose(1, 2, 0)
-            mascara_valida = ~np.any(bloco == nodata, axis=2)
+            mascara_valida = ~(np.all(bloco == 0, axis=2))
             matriz_saida = np.zeros((altura, largura), dtype='uint8')
 
             if np.any(mascara_valida):
