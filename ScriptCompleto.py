@@ -2,6 +2,8 @@
 import os
 import sys
 import time
+import winsound
+import platform
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import multiprocessing as mp
@@ -24,9 +26,12 @@ from rasterio.mask import mask
 from rasterio.merge import merge
 from rasterio.features import rasterize
 
-import winsound
-import platform
-
+import rasterio
+import geopandas as gpd
+import pandas as pd
+from rasterio.mask import mask
+import os
+import questionary
 
 # === Configurações de estilo ===
 cores_ansi = {
@@ -960,6 +965,131 @@ def gerar_matriz_confusao_vetor():
     alerta_conclusao()
     print(f"\n[💾] Relatório salvo como: {nome_saida}")
 
+### SEGMENTAR POR VETOR ###
+
+def segmentar_raster_por_vetor():
+    raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster que será segmentado pelas feições do vetor:")
+    vetor_path = selecionar_arquivo_com_extensoes([".gpkg"], mensagem="Selecione o vetor com as feições (GPKG):")
+
+    gdf = gpd.read_file(vetor_path)
+    campos = [col for col in gdf.columns if col != "geometry"]
+
+    if not campos:
+        print("[⚠] Nenhum campo não-geométrico encontrado no vetor.")
+        return
+
+    campo_id = questionary.select("Selecione o campo que será usado para nomear os arquivos:", choices=campos).ask()
+
+    base_raster_name = os.path.splitext(os.path.basename(raster_path))[0]
+    saida_dir = os.path.join(os.path.dirname(raster_path), f"{base_raster_name}_segmentado_por_vetor")
+    os.makedirs(saida_dir, exist_ok=True)
+
+    with rasterio.open(raster_path) as src:
+        for idx, row in gdf.iterrows():
+            geom = [row.geometry.__geo_interface__]
+            try:
+                out_image, out_transform = mask(src, geom, crop=True)
+            except Exception as e:
+                print(f"[❌] Erro ao recortar feição {idx}: {e}")
+                continue
+
+            if (out_image == 0).all():
+                print(f"[⚠] Segmento ignorado (somente valores 0) para feição {idx}.")
+                continue
+
+            out_meta = src.meta.copy()
+            out_meta.update({
+                "driver": "GTiff",
+                "height": out_image.shape[1],
+                "width": out_image.shape[2],
+                "transform": out_transform
+            })
+
+            valor_base = str(row[campo_id]).replace("/", "-").replace(" ", "_")
+            nome_arquivo = f"{campo_id}_{valor_base}.tif"
+            saida_path = os.path.join(saida_dir, nome_arquivo)
+            contador = 2
+            while os.path.exists(saida_path):
+                nome_arquivo = f"{campo_id}_{valor_base}-{contador}.tif"
+                saida_path = os.path.join(saida_dir, nome_arquivo)
+                contador += 1
+
+            with rasterio.open(saida_path, "w", **out_meta) as dest:
+                dest.write(out_image)
+
+            print(f"[✔] Segmento salvo: {saida_path}")
+
+    alerta_conclusao()
+    print(f"[✔] Segmentos salvos na pasta: {saida_dir}")
+
+def gerar_relatorio_area_segmentos():
+    pasta_segmentos = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione um dos rasters segmentados para definir a pasta:")
+    pasta_segmentos = os.path.dirname(pasta_segmentos)
+    arquivos_tif = [f for f in os.listdir(pasta_segmentos) if f.lower().endswith(".tif")]
+
+    if not arquivos_tif:
+        print("[⚠] Nenhum arquivo .tif encontrado na pasta.")
+        return
+
+    print(f"[📂] Analisando {len(arquivos_tif)} arquivos .tif na pasta: {pasta_segmentos}")
+    relatorio = []
+    todas_classes = set()
+    registros_por_arquivo = {}
+
+    for arquivo in tqdm(arquivos_tif, desc="Processando rasters"):
+        caminho = os.path.join(pasta_segmentos, arquivo)
+        with rasterio.open(caminho) as src:
+            array = src.read(1)
+            transform = src.transform
+            res_x, res_y = transform[0], -transform[4]
+            area_pixel_km2 = (res_x * res_y) / 1_000_000
+
+            classes, contagens = np.unique(array, return_counts=True)
+            total_pixels = 0
+            info = {"arquivo": arquivo}
+
+            for classe, contagem in zip(classes, contagens):
+                if classe == 0:
+                    continue
+                todas_classes.add(classe)
+                info[f"{classe}_px"] = contagem
+                info[f"{classe}_km2"] = round(contagem * area_pixel_km2, 4)
+                total_pixels += contagem
+
+            info["total_px"] = total_pixels
+            info["total_km2"] = round(total_pixels * area_pixel_km2, 4)
+
+            registros_por_arquivo[arquivo] = info
+
+    # Cálculo de percentuais após conhecer todas as classes
+    for info in registros_por_arquivo.values():
+        total = info.get("total_px", 0)
+        for classe in todas_classes:
+            key_px = f"{classe}_px"
+            key_pct = f"{classe}_pct"
+            if key_px in info:
+                info[key_pct] = round(100 * info[key_px] / total, 2)
+            else:
+                info[f"{classe}_px"] = 0
+                info[f"{classe}_km2"] = 0.0
+                info[key_pct] = 0.0
+        relatorio.append(info)
+
+    colunas = ["arquivo"]
+    for classe in sorted(todas_classes):
+        colunas.append(f"{classe}_px")
+    colunas.append("total_px")
+    for classe in sorted(todas_classes):
+        colunas.append(f"{classe}_km2")
+    colunas.append("total_km2")
+    for classe in sorted(todas_classes):
+        colunas.append(f"{classe}_pct")
+
+    df = pd.DataFrame(relatorio)[colunas]
+    nome_saida = os.path.join(pasta_segmentos, "relatorio_areas_segmentadas.xlsx")
+    df.to_excel(nome_saida, index=False)
+    print(f"[📄] Relatório salvo em: {nome_saida}")
+
 # === Menu principal ===
 def menu():
     exibir_banner()
@@ -971,7 +1101,9 @@ def menu():
         ("🧼 Limpar ruído", aplicar_filtro_modo),
         ("🧩 Segmentar rasters", segmentar_raster_em_blocos),
         ("🧩 Unificar rasters", unir_rasters_em_mosaico),
+        ("🧩 Segmentar rasters com vetores", segmentar_raster_por_vetor),
         ("🔎 Analisar raster", analisar_raster),
+        ("🔎 Analisar raster em grupo", gerar_relatorio_area_segmentos),
         ("🖼️ Comparar rasters", comparar_rasters),
         ("📊 Matriz de confusão (Raster x Raster)", gerar_matriz_confusao_raster),
         ("📊 Matriz de confusão (Raster x Vetor)", gerar_matriz_confusao_vetor),
