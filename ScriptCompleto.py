@@ -24,6 +24,9 @@ from rasterio.mask import mask
 from rasterio.merge import merge
 from rasterio.features import rasterize
 
+import winsound
+import platform
+
 
 # === Configurações de estilo ===
 cores_ansi = {
@@ -147,8 +150,19 @@ def selecionar_arquivo_com_extensoes(extensoes, pasta_inicial=".", mensagem="Sel
             pasta_atual = os.path.join(pasta_atual, subpasta)
         else:
             return os.path.join(pasta_atual, escolha)
-    
+
+def alerta_conclusao(som=True):
+    if som:
+        sistema = platform.system()
+        if sistema == "Windows":
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        else:
+            # Para macOS e Linux: usa terminal para tocar um som padrão
+            print('\a')  # Beep via terminal (pode não funcionar em todos os terminais)
+
 def Limpar():
+    alerta_conclusao()
     os.system('cls' if os.name == 'nt' else 'clear')
     exibir_banner()
 
@@ -215,6 +229,7 @@ def treinar_modelo():
     clf = RandomForestClassifier(n_estimators=n_arvores, n_jobs=-1)
     clf.fit(X, y)
     dump(clf, caminho_modelo)
+    alerta_conclusao()
     print(f"[✔] Modelo salvo com sucesso: {caminho_modelo}")
 
 ## === Calssificação de imagens ===
@@ -316,7 +331,8 @@ def classificar_imagem_thread():
         f.write(f"Uso de CPU: {uso_cpu_percentual}% ({n_threads} thread(s))\n")
         f.write(f"Total de pixels classificados: {total_pixels}\n")
         f.write(f"Tempo total de execução: {tempo_total} segundos\n")
-      
+
+    alerta_conclusao()
     print(f"[📝] Relatório salvo como: {relatorio_saida}")
 
 def classificar_bloco_serializado(args):
@@ -412,6 +428,7 @@ def classificar_imagem_pool():
         f.write(f"Total de pixels classificados: {total_pixels}\n")
         f.write(f"Tempo total de execução: {tempo_total} segundos\n")
 
+    alerta_conclusao()
     print(f"[📝] Relatório salvo como: {relatorio_saida}")
 
 ### Classificação de imagem em grupo - inicio
@@ -501,7 +518,7 @@ def classificar_rasters_segmentados():
     print(f"[📄] Log salvo em: {caminho_log}")
     print(f"[⏱️] Tempo total decorrido: {tempo_total:.2f} segundos (~{tempo_total/60:.1f} min)")
 
-### Classificação de imagem em grupo - inicio
+### Classificação de imagem em grupo - fim
 
 def remover_banda_4():
     nome_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o arquivo TIFF (ex: imagem.tif):")
@@ -517,6 +534,8 @@ def remover_banda_4():
         with rasterio.open(saida, 'w', **profile) as dst:
             for i in range(1, 4):
                 dst.write(src.read(i), i)
+
+    alerta_conclusao()
     print(f"[✔] Imagem salva sem banda alfa como: {saida}")
 
 def comparar_rasters():
@@ -592,6 +611,7 @@ def comparar_rasters():
                 dst.write(dif_array, 1)
             print(f"[🗺️] Raster de diferenças salvo como: {diferencas_path}")
 
+        alerta_conclusao()
         print("\n[✔] Comparação concluída.")
 
 def segmentar_raster_em_blocos():
@@ -652,6 +672,7 @@ def segmentar_raster_em_blocos():
                     dst.write(bloco)
                 count += 1
 
+    alerta_conclusao()
     print(f"[✔] Segmentação concluída. Total de blocos salvos: {count}")
     print(f"[📁] Arquivos salvos em: {pasta_saida}")
 
@@ -686,6 +707,7 @@ def unir_rasters_em_mosaico():
     with rasterio.open(saida_path, "w", **perfil) as dst:
         dst.write(mosaico)
 
+    alerta_conclusao()
     print(f"[✔] Mosaico salvo como: {saida_path}")
 
 def analisar_raster():
@@ -725,7 +747,11 @@ def analisar_raster():
                 area_ha = area_m2 / 10_000
                 rel.write(f"{cls:^6} | {count:^7} | {percentual:9.2f}% | {area_m2:10.2f} | {area_ha:9.2f}\n")
 
+        alerta_conclusao()
         print(f"[📊] Relatório gerado: {relatorio_path}")
+
+
+### REDUÇÃO DE RUÍDO ###
 
 def modo_local(pixels, nodata):
     valores = pixels[pixels != nodata] if nodata is not None else pixels
@@ -787,8 +813,11 @@ def aplicar_filtro_modo():
 
     with rasterio.open(saida_path, "w", **profile) as dst:
         dst.write(array_filtrado, 1)
-
+    
+    alerta_conclusao()
     print(f"[✔] Filtro de modo aplicado. Raster salvo como: {saida_path}")
+
+### MATRIZ DE CONFUSÃO ###
 
 def gerar_matriz_confusao_raster():
     from sklearn.metrics import confusion_matrix, classification_report, accuracy_score # Importado na função para deixar o inicio mais leve
@@ -853,9 +882,12 @@ def gerar_matriz_confusao_raster():
             f.write("\nRELATÓRIO:\n")
             f.write(classification_report(y_true, y_pred, labels=labels))
 
+        alerta_conclusao()
         print(f"\n[💾] Relatório salvo como: {nome_saida}")
 
 def gerar_matriz_confusao_vetor():
+    from sklearn.metrics import confusion_matrix, classification_report, accuracy_score # Importado na função para deixar o inicio mais leve
+
     print("[📊] Gerar matriz de confusão com base em vetor de amostras")
     raster_pred = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado (modelo predito):")
     vetor_ref = selecionar_arquivo_com_extensoes([".gpkg"], mensagem="Selecione o arquivo de amostras (GPKG):")
@@ -925,6 +957,7 @@ def gerar_matriz_confusao_vetor():
         f.write("\nRELATÓRIO:\n")
         f.write(classification_report(y_true, y_pred, labels=labels))
 
+    alerta_conclusao()
     print(f"\n[💾] Relatório salvo como: {nome_saida}")
 
 # === Menu principal ===
