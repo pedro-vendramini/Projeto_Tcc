@@ -166,26 +166,29 @@ def alerta_conclusao(som=True):
             # Para macOS e Linux: usa terminal para tocar um som padrão
             print('\a')  # Beep via terminal (pode não funcionar em todos os terminais)
 
-def Limpar():
-    alerta_conclusao()
+def Limpar(banner=True):
     os.system('cls' if os.name == 'nt' else 'clear')
-    exibir_banner()
+    if banner:
+        exibir_banner()
 
 # === Funções do programa ===
 def treinar_modelo():
     vetor_amostras = selecionar_arquivo_com_extensoes([".gpkg"], mensagem="Selecione o arquivo de amostras (GPKG):")
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster de entrada (TIF):")
 
-    nome_raster = os.path.splitext(os.path.basename(raster_path))[0]
-    campo_classe = questionary.text("Nome do campo com o valor da classe:").ask()
+    print("[1] Lendo atributos disponíveis no vetor...")
+    gdf_temp = gpd.read_file(vetor_amostras)
+    campos_disponiveis = [col for col in gdf_temp.columns if col != "geometry"]
+    campo_classe = questionary.select("Selecione o campo com o valor da classe:", choices=campos_disponiveis).ask()
+
+    nome_vetor = os.path.splitext(os.path.basename(vetor_amostras))[0]
     n_arvores = int(questionary.text("Número de árvores no modelo Random Forest:").ask())
 
-    nome_sugerido = f"{nome_raster}-N{n_arvores}-modelo"
+    nome_sugerido = f"{nome_vetor}-N{n_arvores}-modelo"
     modelo_saida_nome = questionary.text("Nome do arquivo de saída para o modelo (sem extensão):", default=nome_sugerido).ask()
     if not modelo_saida_nome.lower().endswith(".pkl"):
         modelo_saida_nome += ".pkl"
 
-    # Pasta padrão para salvar o modelo
     pasta_padrao = os.path.join(os.path.dirname(__file__), "Modelos treinados")
     os.makedirs(pasta_padrao, exist_ok=True)
 
@@ -197,15 +200,14 @@ def treinar_modelo():
         os.makedirs(pasta_customizada, exist_ok=True)
         caminho_modelo = os.path.join(pasta_customizada, modelo_saida_nome)
 
-    print("[1] Iniciando carregamento das amostras vetoriais...")
-    gdf = gpd.read_file(vetor_amostras)
-    gdf = gdf[[campo_classe, "geometry"]].dropna(subset=["geometry"])
-    print(f"[1.1] Total de amostras (polígonos) carregadas: {len(gdf)}")
+    print("[2] Iniciando carregamento das amostras vetoriais...")
+    gdf = gdf_temp[[campo_classe, "geometry"]].dropna(subset=["geometry"])
+    print(f"[2.1] Total de amostras (polígonos) carregadas: {len(gdf)}")
 
     features, labels = [], []
     total_pixels = 0
 
-    print("[2] Processando polígonos e extraindo pixels do raster...")
+    print("[3] Processando polígonos e extraindo pixels do raster...")
     with rasterio.open(raster_path) as src:
         for idx, row in tqdm(gdf.iterrows(), total=len(gdf), desc="Extraindo pixels"):
             geom = [row.geometry.__geo_interface__]
@@ -221,16 +223,16 @@ def treinar_modelo():
             labels.extend([row[campo_classe]] * data.shape[0])
             total_pixels += data.shape[0]
 
-    print(f"[2.1] Total de pixels extraídos para treinamento: {total_pixels}")
+    print(f"[3.1] Total de pixels extraídos para treinamento: {total_pixels}")
 
     X = np.vstack(features)
     y = np.array(labels)
 
     if X.shape[0] > 10_000_000:
-        print(f"[2.2] Reduzindo para 10.000.000 de pixels (amostragem aleatória com balanceamento)...")
+        print("[3.2] Reduzindo para 10.000.000 de pixels (amostragem aleatória com balanceamento)...")
         X, y = resample(X, y, n_samples=10_000_000, random_state=42)
 
-    print("[3] Treinando modelo Random Forest...")
+    print("[4] Treinando modelo Random Forest...")
     clf = RandomForestClassifier(n_estimators=n_arvores, n_jobs=-1)
     clf.fit(X, y)
     dump(clf, caminho_modelo)
@@ -449,30 +451,41 @@ def classificar_rasters_segmentados():
     pasta_saida = os.path.join(os.path.dirname(pasta_segmentos), nome_final)
     os.makedirs(pasta_saida, exist_ok=True)
 
-    # Caminho do log
     caminho_log = os.path.join(pasta_saida, "classificados.log")
+    caminho_relatorio = os.path.join(pasta_saida, "relatorio_classificacao.txt")
 
-    # Lê o log existente se houver
     classificados_existentes = set()
     if os.path.exists(caminho_log):
         with open(caminho_log, "r", encoding="utf-8") as f:
             classificados_existentes = set(linha.strip() for linha in f if linha.strip())
 
+    # Remover arquivos que não estão no log, pois podem estar corrompidos/incompletos
+    for f in os.listdir(pasta_saida):
+        if f.lower().endswith(".tif") and f not in classificados_existentes:
+            try:
+                os.remove(os.path.join(pasta_saida, f))
+                print(f"[🗑️] Arquivo removido (não consta no log): {f}")
+            except Exception as e:
+                print(f"[⚠️] Erro ao tentar remover {f}: {e}")
+
     modelo = load(modelo_path)
-    inicio_geral = time.time()
     duracoes = []
     arquivos_processados = 0
     total = len(arquivos_tif)
+
+    inicio_geral = None
+    total_pixels = 0
 
     for idx, raster_entrada in enumerate(arquivos_tif):
         nome_base, extensao = os.path.splitext(os.path.basename(raster_entrada))
         nome_saida = f"{nome_base}-classificado{extensao}"
         raster_saida = os.path.join(pasta_saida, nome_saida)
 
-        # Se já estiver no log, pula
         if nome_saida in classificados_existentes:
-            arquivos_processados += 1
             continue
+
+        if inicio_geral is None:
+            inicio_geral = time.time()
 
         inicio = time.time()
 
@@ -496,32 +509,47 @@ def classificar_rasters_segmentados():
         fim = time.time()
         duracoes.append(fim - inicio)
         arquivos_processados += 1
+        total_pixels += largura * altura
 
-        # Atualiza o log
         with open(caminho_log, "a", encoding="utf-8") as f:
             f.write(nome_saida + "\n")
 
-        # Cálculos de tempo
-        tempo_decorrido = fim - inicio_geral
+        tempo_decorrido = fim - inicio_geral if inicio_geral else 0
         tempo_medio = sum(duracoes) / len(duracoes)
-        restantes = total - arquivos_processados
+        restantes = total - (len(classificados_existentes) + arquivos_processados)
         estimativa_restante = tempo_medio * restantes
         tempo_estimado_total = tempo_decorrido + estimativa_restante
-        percentual = (arquivos_processados / total) * 100
+        percentual = ((len(classificados_existentes) + arquivos_processados) / total) * 100
 
-        # Atualiza a tela
         Limpar()
         print(f"[🧠] Processamento de rasters segmentado (📁 {os.path.basename(pasta_segmentos)})")
-        print(f"    Processado {arquivos_processados}/{total} rasters ({percentual:.1f}%)")
+        print(f"    Processado {len(classificados_existentes) + arquivos_processados}/{total} rasters ({percentual:.1f}%)")
         print(f"    Tempo decorrido: {int(tempo_decorrido)}s ({tempo_decorrido/60:.1f}m)")
         print(f"    Tempo estimado até concluir: {int(estimativa_restante)}s ({estimativa_restante/60:.1f}m)")
         print(f"    Tempo total estimado: {int(tempo_estimado_total)}s ({tempo_estimado_total/60:.1f}m)\n")
 
-    tempo_total = time.time() - inicio_geral
-    print("[✔] Classificação concluída.")
-    print(f"[📂] Resultados salvos em: {pasta_saida}")
-    print(f"[📄] Log salvo em: {caminho_log}")
-    print(f"[⏱️] Tempo total decorrido: {tempo_total:.2f} segundos (~{tempo_total/60:.1f} min)")
+    if inicio_geral:
+        tempo_total = time.time() - inicio_geral
+        print("[✔] Classificação concluída.")
+        print(f"[📂] Resultados salvos em: {pasta_saida}")
+        print(f"[📄] Log salvo em: {caminho_log}")
+        print(f"[⏱️] Tempo total decorrido: {tempo_total:.2f} segundos (~{tempo_total/60:.1f} min)")
+
+        with open(caminho_relatorio, "w", encoding="utf-8") as f:
+            f.write("RELATÓRIO DE CLASSIFICAÇÃO DE IMAGEM\n")
+            f.write(f"Data e hora: {datetime.now()}\n\n")
+            f.write(f"Modelo utilizado: {modelo_path}\n\n")
+            f.write(f"Tamanho do bloco: imagem completa\n")
+            f.write(f"Uso de CPU: 100% (1 processo)\n")
+            f.write(f"Total de pixels classificados: {total_pixels}\n")
+            f.write(f"Tempo total de execução: {round(tempo_total, 2)} segundos\n")
+            f.write(f"Quantidade de rasters processados: {arquivos_processados}\n")
+            f.write(f"Pasta de saída: {pasta_saida}\n")
+
+    else:
+        print("[✔] Nenhum novo raster precisou ser processado.")
+
+    alerta_conclusao()
 
 ### Classificação de imagem em grupo - fim
 
@@ -754,7 +782,6 @@ def analisar_raster():
 
         alerta_conclusao()
         print(f"[📊] Relatório gerado: {relatorio_path}")
-
 
 ### REDUÇÃO DE RUÍDO ###
 
@@ -1090,6 +1117,47 @@ def gerar_relatorio_area_segmentos():
     df.to_excel(nome_saida, index=False)
     print(f"[📄] Relatório salvo em: {nome_saida}")
 
+def verificar_resolucao_raster():
+    modo = questionary.select(
+        "Deseja verificar a resolução de um único raster ou de todos os rasters em uma pasta?",
+        choices=["📄 Analisar um único raster", "📁 Analisar todos os rasters de uma pasta"],
+        style=estilo_personalizado_selecao
+    ).ask()
+
+    resultados = []
+
+    if modo == "📄 Analisar um único raster":
+        raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster para verificar a resolução:")
+        with rasterio.open(raster_path) as src:
+            transform = src.transform
+            res_x, res_y = transform[0], -transform[4]
+        resultados.append((os.path.basename(raster_path), res_x, res_y))
+
+    else:
+        raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione qualquer raster da pasta desejada:")
+        pasta = os.path.dirname(raster_exemplo)
+        arquivos_tif = [f for f in sorted(os.listdir(pasta)) if f.lower().endswith(".tif")]
+
+        for nome in arquivos_tif:
+            caminho = os.path.join(pasta, nome)
+            try:
+                with rasterio.open(caminho) as src:
+                    transform = src.transform
+                    res_x, res_y = transform[0], -transform[4]
+                resultados.append((nome, res_x, res_y))
+            except:
+                resultados.append((nome, None, None))
+
+    # Exibir resumo
+    print("\n📊 RESUMO DAS RESOLUÇÕES:")
+    for nome, res_x, res_y in resultados:
+        if res_x is not None:
+            print(f"🗂️ {nome} → {res_x:.4f}m x {res_y:.4f}m (área: {res_x * res_y:.4f} m²)")
+        else:
+            print(f"⚠️ {nome} → Erro ao abrir ou ler o raster.")
+
+    alerta_conclusao()
+
 # === Menu principal ===
 def menu():
     exibir_banner()
@@ -1104,6 +1172,7 @@ def menu():
         ("🧩 Segmentar rasters com vetores", segmentar_raster_por_vetor),
         ("🔎 Analisar raster", analisar_raster),
         ("🔎 Analisar raster em grupo", gerar_relatorio_area_segmentos),
+        ("📐 Verificar resolução do raster", verificar_resolucao_raster),
         ("🖼️ Comparar rasters", comparar_rasters),
         ("📊 Matriz de confusão (Raster x Raster)", gerar_matriz_confusao_raster),
         ("📊 Matriz de confusão (Raster x Vetor)", gerar_matriz_confusao_vetor),
@@ -1129,4 +1198,5 @@ def menu():
                 break
 
 if __name__ == "__main__":
+    Limpar(banner=False)
     menu()
