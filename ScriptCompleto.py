@@ -21,6 +21,7 @@ from sklearn.utils import resample
 from tqdm import tqdm
 
 # === Bibliotecas específicas de geoprocessamento ===
+from rasterio.features import geometry_mask
 import geopandas as gpd
 import rasterio
 from rasterio.features import rasterize
@@ -330,19 +331,19 @@ def classificar_imagem_thread(modelo_path, raster_entrada, tamanho_bloco, uso_cp
     alerta_conclusao()
     print(f"[📝] Relatório salvo como: {relatorio_saida}")
 
-def classificar_imagem_pool(modelo_path, raster_entrada, tamanho_bloco, uso_cpu_percentual, n_threads):
-    def classificar_bloco_serializado(args):
-        window, bloco, nodata, modelo_bytes = args
-        modelo = pickle.loads(modelo_bytes)
-        bloco = bloco.transpose(1, 2, 0)
-        mascara_valida = ~(np.all(bloco == 0, axis=2))
-        matriz_saida = np.zeros((bloco.shape[0], bloco.shape[1]), dtype='uint8')
-        if np.any(mascara_valida):
-            bloco_2d = bloco[mascara_valida]
-            previsoes = modelo.predict(bloco_2d)
-            matriz_saida[mascara_valida] = previsoes.astype('uint8')
-        return (window, matriz_saida)
+def classificar_bloco_serializado(args):
+    window, bloco, nodata, modelo_bytes = args
+    modelo = pickle.loads(modelo_bytes)
+    bloco = bloco.transpose(1, 2, 0)
+    mascara_valida = ~(np.all(bloco == 0, axis=2))
+    matriz_saida = np.zeros((bloco.shape[0], bloco.shape[1]), dtype='uint8')
+    if np.any(mascara_valida):
+        bloco_2d = bloco[mascara_valida]
+        previsoes = modelo.predict(bloco_2d)
+        matriz_saida[mascara_valida] = previsoes.astype('uint8')
+    return (window, matriz_saida)
 
+def classificar_imagem_pool(modelo_path, raster_entrada, tamanho_bloco, uso_cpu_percentual, n_threads):
     nome_base, extensao = os.path.splitext(raster_entrada)
     raster_saida_base = f"{nome_base}-classificado"
     raster_saida = raster_saida_base + extensao
@@ -1381,6 +1382,122 @@ def gerar_matriz_confusao_vetor():
     alerta_conclusao()
     print(f"\n[💾] Relatório salvo como: {nome_saida}")
 
+## Converter banda 0 para NoData
+
+def converter_zeros_para_nodata():
+    raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster com valor 0 a ser tratado como NoData:")
+    if not raster_path:
+        return
+
+    with rasterio.open(raster_path) as src:
+        array = src.read(1)
+        profile = src.profile.copy()
+        altura, largura = array.shape
+        dtype = profile["dtype"]
+
+        # Definir valor nodata apropriado com base no tipo
+        if dtype == "uint8":
+            novo_valor_nodata = 255
+        elif dtype.startswith("int") or dtype.startswith("float"):
+            novo_valor_nodata = -9999
+        else:
+            print(f"[⚠] Tipo de dado {dtype} não suportado automaticamente. Configure manualmente.")
+            return
+
+        # Substituir 0 por novo valor de NoData
+        array_corrigido = np.where(array == 0, novo_valor_nodata, array)
+        profile.update(nodata=novo_valor_nodata, compress='lzw')
+
+    nome_base = os.path.splitext(os.path.basename(raster_path))[0]
+    saida_path = os.path.join(os.path.dirname(raster_path), f"{nome_base}_NoDataCorrigido.tif")
+    contador = 2
+    while os.path.exists(saida_path):
+        saida_path = os.path.join(os.path.dirname(raster_path), f"{nome_base}_NoDataCorrigido({contador}).tif")
+        contador += 1
+
+    with rasterio.open(saida_path, "w", **profile) as dst:
+        dst.write(array_corrigido, 1)
+
+    alerta_conclusao()
+    print(f"[✔] Raster convertido salvo em: {saida_path}")
+
+
+## Preencher vazios - Não tá valendo ainda
+
+def modo_local_preencher(pixels, nodata):
+    try:
+        valores = pixels[pixels != nodata] if nodata is not None else pixels
+        valores = valores[valores >= 0]  # evita valores negativos
+        if len(valores) == 0:
+            return nodata if nodata is not None else 0
+        return np.bincount(valores.astype(int)).argmax()
+    except Exception as e:
+        print(f"[⚠️ ERRO modo_local_preencher] {e}")
+        return nodata if nodata is not None else 0
+
+def preencher_buracos_com_vizinhanca():
+    raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster unido com buracos:")
+    if not raster_path:
+        return
+
+    usar_mascara = questionary.confirm("Deseja usar um vetor (.gpkg ou .shp) para limitar a área de preenchimento?").ask()
+    vetor_path = None
+
+    if usar_mascara:
+        vetor_path = selecionar_arquivo_com_extensoes([".gpkg", ".shp"], mensagem="Selecione o vetor que delimita a área:")
+
+    tamanho_janela = int(questionary.text("Tamanho da janela (ímpar, ex: 3, 5, 7):", default="3").ask())
+    if tamanho_janela % 2 == 0:
+        print("[⚠] A janela deve ser um número ímpar.")
+        return
+
+    print("🔄 Iniciando preenchimento de buracos...")
+    with rasterio.open(raster_path) as src:
+        perfil = src.profile.copy()
+        array = src.read(1)
+        altura, largura = array.shape
+        nodata = src.nodata if src.nodata is not None else 255  # fallback para uint8
+
+        if usar_mascara:
+            gdf = gpd.read_file(vetor_path)
+            geometries = gdf.geometry.values
+            mask_area = geometry_mask(geometries, transform=src.transform, invert=True, out_shape=src.shape)
+        else:
+            mask_area = np.ones_like(array, dtype=bool)
+
+        buracos = (array == 0) | (array == nodata)
+        mascara_preenchimento = buracos & mask_area
+
+        print("🧠 Aplicando filtro de vizinhança (pode demorar)...")
+        array_filtro = generic_filter(array, lambda p: modo_local_preencher(p, nodata), size=tamanho_janela, mode="nearest")
+
+        array_corrigido = array.copy()
+        linhas, colunas = np.where(mascara_preenchimento)
+        total = len(linhas)
+
+        print("🎯 Substituindo pixels com base no resultado do filtro...")
+        for i in tqdm(range(total), desc="Preenchendo", unit="px"):
+            y, x = linhas[i], colunas[i]
+            array_corrigido[y, x] = array_filtro[y, x]
+
+    sufixo = "-preenchido-area" if usar_mascara else "-preenchido-total"
+    nome_base = os.path.splitext(os.path.basename(raster_path))[0]
+    saida_base = os.path.join(os.path.dirname(raster_path), f"{nome_base}{sufixo}.tif")
+    caminho_saida = saida_base
+    contador = 2
+    while os.path.exists(caminho_saida):
+        caminho_saida = os.path.join(os.path.dirname(raster_path), f"{nome_base}{sufixo}({contador}).tif")
+        contador += 1
+
+    perfil.update(compress="lzw", nodata=nodata)
+
+    with rasterio.open(caminho_saida, "w", **perfil) as dst:
+        dst.write(array_corrigido, 1)
+
+    alerta_conclusao()
+    print(f"[✅] Raster preenchido salvo em: {caminho_saida}")
+
+
 # === Submenus ===
 def submenu(titulo, opcoes):
     opcoes_submenu = opcoes + [("🔙 Voltar", None)]
@@ -1444,6 +1561,8 @@ def menu():
         ("🧼 Limpar ruído", submenu_limpar_ruido),
         ("🧩 Segmentação e unificação de raster", submenu_segmentacao),
         ("🔎 Analisar raster", submenu_analisar),
+        ("🩹 Preencher buracos com vizinhança", preencher_buracos_com_vizinhanca),
+        ("🔎 Converter banda 0 para NoData", converter_zeros_para_nodata),
         ("📊 Matrizes de confusão", submenu_matriz),
         ("🧹 Remover banda 4 (imagem RGB)", remover_banda_4),
         ("🧹 Limpar prompt", Limpar),
