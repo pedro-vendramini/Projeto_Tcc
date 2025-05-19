@@ -538,31 +538,28 @@ def classificar_rasters_segmentados():
 ## Segmentações e uniões
 
 def segmentar_raster_em_blocos():
-    raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster a ser segmentado:")
+    raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="🖼️ Selecione o raster a ser segmentado:")
 
-    opcoes = [
-        questionary.Choice(title="256", value=256),
-        questionary.Choice(title="512", value=512),
-        questionary.Choice(title="1024", value=1024),
-        questionary.Choice(title="2048 (padrão)", value=2048),
-        questionary.Choice(title="4096", value=4096),
-        questionary.Choice(title="🔧 Inserir valor personalizado", value="custom")
-    ]
+    escolha = questionary.select(
+        "📐 Escolha o tamanho do bloco (em pixels):",
+        choices=["256", "512", "1024", "2048", "4096", "8192", "🔧 Inserir valor personalizado"],
+        default="2048",
+        style=estilo_personalizado_selecao
+    ).ask()
 
-    escolha = questionary.select("🔧 Escolha o tamanho do bloco (em pixels):", choices=opcoes, default=2048).ask()
-
-    if escolha == "custom":
+    if escolha == "🔧 Inserir valor personalizado":
         while True:
-            try:
-                bloco_pixels = int(questionary.text("Digite o tamanho do bloco (em pixels):", default="2048").ask())
+            entrada = questionary.text("🧩 Digite o tamanho do bloco (em pixels):", default="2048").ask()
+            if entrada and entrada.isdigit():
+                bloco_pixels = int(entrada)
                 if bloco_pixels > 0:
                     break
                 else:
-                    print("[⚠] Por favor, insira um valor positivo.")
-            except ValueError:
-                print("[⚠] Valor inválido, tente novamente.")
+                    print("[⚠️] Por favor, insira um número positivo maior que zero.")
+            else:
+                print("[⚠️] Entrada inválida. Insira apenas números inteiros.")
     else:
-        bloco_pixels = escolha
+        bloco_pixels = int(escolha)
 
     nome_base = os.path.splitext(os.path.basename(raster_path))[0]
     pasta_saida = os.path.join(
@@ -571,33 +568,41 @@ def segmentar_raster_em_blocos():
     )
     os.makedirs(pasta_saida, exist_ok=True)
 
+    print(f"\n🔄 Segmentando o raster com blocos de {bloco_pixels}x{bloco_pixels} pixels...")
+
     with rasterio.open(raster_path) as src:
         largura, altura = src.width, src.height
         profile = src.profile.copy()
 
+        blocos_total = ((altura + bloco_pixels - 1) // bloco_pixels) * ((largura + bloco_pixels - 1) // bloco_pixels)
         count = 0
-        for i in range(0, altura, bloco_pixels):
-            for j in range(0, largura, bloco_pixels):
-                h = min(bloco_pixels, altura - i)
-                w = min(bloco_pixels, largura - j)
-                window = Window(j, i, w, h)
-                transform = src.window_transform(window)
-                bloco = src.read(window=window)
 
-                profile.update({
-                    "height": h,
-                    "width": w,
-                    "transform": transform
-                })
+        with tqdm(total=blocos_total, desc="📦 Processando blocos", unit="bloco") as barra:
+            for i in range(0, altura, bloco_pixels):
+                for j in range(0, largura, bloco_pixels):
+                    h = min(bloco_pixels, altura - i)
+                    w = min(bloco_pixels, largura - j)
+                    window = Window(j, i, w, h)
+                    transform = src.window_transform(window)
+                    bloco = src.read(window=window)
 
-                nome_bloco = os.path.join(pasta_saida, f"{nome_base}_bloco_{i}_{j}.tif")
-                with rasterio.open(nome_bloco, "w", **profile) as dst:
-                    dst.write(bloco)
-                count += 1
+                    profile.update({
+                        "height": h,
+                        "width": w,
+                        "transform": transform
+                    })
+
+                    nome_bloco = os.path.join(pasta_saida, f"{nome_base}_bloco_{i}_{j}.tif")
+                    with rasterio.open(nome_bloco, "w", **profile) as dst:
+                        dst.write(bloco)
+
+                    count += 1
+                    barra.update(1)
 
     alerta_conclusao()
-    print(f"[✔] Segmentação concluída. Total de blocos salvos: {count}")
-    print(f"[📁] Arquivos salvos em: {pasta_saida}")
+    print(f"\n✅ Segmentação concluída.")
+    print(f"📦 Total de blocos salvos: {count}")
+    print(f"📁 Arquivos armazenados em: {pasta_saida}")
 
 def unir_rasters_em_mosaico():
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione qualquer raster da pasta a ser unida:")
