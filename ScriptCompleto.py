@@ -1216,6 +1216,50 @@ def gerar_matriz_confusao_vetor():
     alerta_conclusao()
     print(f"\n[💾] Relatório salvo como: {nome_saida}")
 
+# === Submenus ===
+def submenu(titulo, opcoes):
+    opcoes_submenu = opcoes + [("🔙 Voltar", None)]
+    while True:
+        escolha = questionary.select(
+            titulo,
+            choices=[texto for texto, _ in opcoes_submenu],
+            style=estilo_personalizado_selecao
+        ).ask()
+
+        for texto, funcao in opcoes_submenu:
+            if escolha == texto:
+                Limpar()
+                if funcao is None:
+                    return
+                funcao()
+                break
+
+def submenu_segmentacao():
+    titulo = "🧩 Segmentação e unificação - Escolha uma ação:"
+    opcoes_submenu = [
+        ("🧩 Segmentar rasters em blocos fixos", segmentar_raster_em_blocos),
+        ("🧩 Segmentar rasters com vetores", segmentar_raster_por_vetor),
+        ("🖼️ Unificar rasters", unir_rasters_em_mosaico),
+    ]
+    submenu(titulo, opcoes_submenu)
+
+def submenu_matriz():
+    titulo = "📊 Matrizes de confusão - Escolha uma ação:"
+    opcoes_submenu = [
+        ("📊 Matriz de confusão (Raster x Raster)", gerar_matriz_confusao_raster),
+        ("📊 Matriz de confusão (Raster x Vetor)", gerar_matriz_confusao_vetor),
+    ]
+    submenu(titulo, opcoes_submenu)
+
+def submenu_analisar():
+    titulo = "🔍 Análises e verificações - Escolha uma ação:"
+    opcoes_submenu = [
+        ("🔎 Analisar raster", analisar_raster),
+        ("🔎 Analisar raster em grupo", gerar_relatorio_area_segmentos),
+        ("📐 Verificar resolução do raster", verificar_resolucao_raster),
+        ("🖼️ Comparar rasters", comparar_rasters),
+    ]
+    submenu(titulo, opcoes_submenu)
 
 # === Menu principal ===
 def menu():
@@ -1224,24 +1268,17 @@ def menu():
         ("🧠 Treinar modelo", treinar_modelo),
         ("🧮 Classificar raster (individual ou em grupo)", classificar_imagem),
         ("🧼 Limpar ruído", aplicar_filtro_modo),
-        ("🧩 Segmentar rasters", segmentar_raster_em_blocos),
-        ("🧩 Unificar rasters", unir_rasters_em_mosaico),
-        ("🧩 Segmentar rasters com vetores", segmentar_raster_por_vetor),
-        ("🔎 Analisar raster", analisar_raster),
-        ("🔎 Analisar raster em grupo", gerar_relatorio_area_segmentos),
-        ("📐 Verificar resolução do raster", verificar_resolucao_raster),
-        ("🖼️ Comparar rasters", comparar_rasters),
-        ("📊 Matriz de confusão (Raster x Raster)", gerar_matriz_confusao_raster),
-        ("📊 Matriz de confusão (Raster x Vetor)", gerar_matriz_confusao_vetor),
+        ("🧩 Segmentação e unificação de raster", submenu_segmentacao),
+        ("🔎 Analisar raster", submenu_analisar),
+        ("📊 Matrizes de confusão", submenu_matriz),
         ("🧹 Remover banda 4 (imagem RGB)", remover_banda_4),
         ("🧹 Limpar prompt", Limpar),
         ("❌ Sair", None)
     ]
-
+    
     while True:
-        print("\n")
         escolha = questionary.select(
-            "Escolha uma ação:",
+            "📋 MENU PRINCIPAL - Escolha uma ação:",
             choices=[texto for texto, _ in opcoes],
             style=estilo_personalizado_selecao
         ).ask()
@@ -1251,6 +1288,7 @@ def menu():
                 if funcao is None:
                     os.system('cls' if os.name == 'nt' else 'clear')
                     return
+                Limpar()
                 funcao()
                 break
 
