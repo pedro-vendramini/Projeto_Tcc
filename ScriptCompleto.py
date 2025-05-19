@@ -1048,7 +1048,7 @@ def wrapper_filtro_raster(args):
     except Exception as e:
         return f"[⚠️] Erro em {raster_path}: {e}"
 
-def aplicar_filtro_modo_lote():
+def aplicar_filtro_modo_lote_por_arquivo():
     raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione um dos rasters classificados:")
     pasta_origem = os.path.dirname(raster_exemplo)
     arquivos = [os.path.join(pasta_origem, f) for f in os.listdir(pasta_origem) if f.lower().endswith(".tif")]
@@ -1116,6 +1116,121 @@ def aplicar_filtro_modo_lote():
             print(f"Tempo decorrido: {tempo_decorrido}s ({tempo_decorrido // 60} min)")
             print(f"Tempo estimado para finalizar: {estimado_restante}s ({estimado_restante // 60} min)")
             print(f"Tempo total estimado: {estimado_total}s ({estimado_total // 60} min)\n")
+
+    alerta_conclusao()
+    tempo_total = int(time.time() - inicio_total)
+    print(f"[✅] Todos os filtros foram aplicados. Rasters salvos em: {pasta_saida}")
+    print(f"[📄] Log salvo em: {caminho_log}")
+    print(f"[⏱] Tempo total de execução: {tempo_total}s ({tempo_total // 60} min)")
+
+def aplicar_filtro_modo_lote_por_blocos():
+    raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione um dos rasters classificados:")
+    pasta_origem = os.path.dirname(raster_exemplo)
+    arquivos = [os.path.join(pasta_origem, f) for f in os.listdir(pasta_origem) if f.lower().endswith(".tif")]
+
+    tamanho_janela = int(questionary.text("Tamanho da janela (ímpar, ex: 3, 5, 7):", default="3").ask())
+    if tamanho_janela % 2 == 0:
+        print("[⚠] A janela deve ser um número ímpar.")
+        return
+
+    bloco_altura = int(questionary.select(
+        "Altura do bloco (linhas por processo):",
+        choices=["128", "256", "512", "1024", "2048", "4096"],
+        default="1024",
+        style=estilo_personalizado_selecao
+    ).ask())
+
+    total_cores = mp.cpu_count()
+    uso_cpu = int(questionary.text(f"Uso da CPU (%):", default="100").ask())
+    n_proc = max(1, int((uso_cpu / 100) * total_cores))
+
+    nome_pasta = os.path.basename(pasta_origem.rstrip("/\\")) + f"-modo{tamanho_janela}"
+    pasta_saida = os.path.join(os.path.dirname(pasta_origem), nome_pasta)
+    os.makedirs(pasta_saida, exist_ok=True)
+
+    # Log
+    caminho_log = os.path.join(pasta_saida, "processados.log")
+    processados = set()
+    if os.path.exists(caminho_log):
+        with open(caminho_log, "r", encoding="utf-8") as f:
+            processados = set(linha.strip() for linha in f if linha.strip())
+
+    tarefas = []
+    for raster_path in arquivos:
+        nome_base = os.path.splitext(os.path.basename(raster_path))[0]
+        nome_saida = f"{nome_base}_modo{tamanho_janela}.tif"
+        if nome_saida not in processados:
+            tarefas.append((raster_path, nome_saida))
+
+    total = len(tarefas)
+    if total == 0:
+        print("[ℹ] Todos os rasters já foram processados anteriormente.")
+        return
+
+    print(f"\n🔁 Iniciando limpeza de ruído por blocos em {total} raster(s) com {n_proc} processo(s)...\n")
+
+    inicio_total = time.time()
+    duracoes = []
+    concluídos = 0
+
+    for idx, (raster_path, nome_saida) in enumerate(tarefas):
+        t_inicio = time.time()
+
+        try:
+            with rasterio.open(raster_path) as src:
+                array = src.read(1)
+                profile = src.profile.copy()
+                nodata = src.nodata
+                altura, largura = array.shape
+
+            blocos = [
+                (array, i, min(i + bloco_altura, altura), nodata, tamanho_janela)
+                for i in range(0, altura, bloco_altura)
+            ]
+            array_filtrado = np.full_like(array, nodata if nodata is not None else 0)
+
+            with mp.Pool(processes=n_proc) as pool:
+                for inicio_bloco, resultado in pool.imap(processar_bloco_vertical, blocos):
+                    array_filtrado[inicio_bloco:inicio_bloco + resultado.shape[0], :] = resultado
+
+            profile.update(compress='lzw')
+            if nodata is not None:
+                profile.update(nodata=nodata)
+
+            saida_path = os.path.join(pasta_saida, nome_saida)
+            contador = 2
+            while os.path.exists(saida_path):
+                saida_path = os.path.join(pasta_saida, f"{os.path.splitext(nome_saida)[0]}({contador}).tif")
+                contador += 1
+
+            with rasterio.open(saida_path, "w", **profile) as dst:
+                dst.write(array_filtrado, 1)
+
+            with open(caminho_log, "a", encoding="utf-8") as f:
+                f.write(os.path.basename(saida_path) + "\n")
+
+            print(f"[✔] {os.path.basename(raster_path)} processado com sucesso.")
+
+        except Exception as e:
+            print(f"[⚠️] Erro ao processar {raster_path}: {e}")
+            continue
+
+        # Resumo após cada raster
+        concluídos += 1
+        tempo_raster = time.time() - t_inicio
+        tempo_decorrido = time.time() - inicio_total
+        duracoes.append(tempo_raster)
+        tempo_medio = sum(duracoes) / len(duracoes)
+        restante = total - concluídos
+        estimado_restante = int(tempo_medio * restante)
+        estimado_total = int(tempo_decorrido + estimado_restante)
+
+        Limpar()
+        print(f"\n📊 LIMPEZA DE RUÍDO POR BLOCOS")
+        print(f"Rasters processados: {concluídos}/{total}")
+        print(f"Tempo decorrido: {int(tempo_decorrido)}s ({tempo_decorrido // 60} min)")
+        print(f"Tempo estimado para finalizar: {estimado_restante}s ({estimado_restante // 60} min)")
+        print(f"Tempo total estimado: {estimado_total}s ({estimado_total // 60} min)\n")
 
     alerta_conclusao()
     tempo_total = int(time.time() - inicio_total)
@@ -1315,7 +1430,8 @@ def submenu_limpar_ruido():
     titulo = "🧼 Redução de Ruído - Escolha uma opção:"
     opcoes_submenu = [
         ("📄 Aplicar filtro em um único raster", aplicar_filtro_modo_individual),
-        ("📁 Aplicar filtro em lote (todos da pasta)", aplicar_filtro_modo_lote),
+        ("📁 Aplicar filtro em lote (Paralelo por bloco interno)", aplicar_filtro_modo_lote_por_blocos),
+        ("📁 Aplicar filtro em lote (Paralelo por Arquivo)", aplicar_filtro_modo_lote_por_arquivo),
     ]
     submenu(titulo, opcoes_submenu)
 
