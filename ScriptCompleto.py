@@ -961,25 +961,14 @@ def processar_bloco_vertical(args):
     )
     return (start, filtrado)
 
-def aplicar_filtro_modo():
-    modo = questionary.select(
-        "Deseja aplicar o filtro de modo em:",
-        choices=["📄 Um único raster", "📁 Todos os rasters da pasta"],
-        style=estilo_personalizado_selecao
-    ).ask()
-
-    if modo == "📄 Um único raster":
-        raster_paths = [selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado para aplicar o filtro de modo:")]
-    else:
-        raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione qualquer raster da pasta:")
-        pasta = os.path.dirname(raster_exemplo)
-        raster_paths = [
-            os.path.join(pasta, f) for f in sorted(os.listdir(pasta)) if f.lower().endswith(".tif")
-        ]
+def aplicar_filtro_modo_individual():
+    raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado para aplicar o filtro:")
+    if not raster_path:
+        return
 
     tamanho_janela = int(questionary.text("Tamanho da janela (ímpar, ex: 3, 5, 7):", default="3").ask())
     if tamanho_janela % 2 == 0:
-        print("[⚠] O tamanho da janela deve ser um número ímpar.")
+        print("[⚠] A janela deve ser um número ímpar.")
         return
 
     bloco_altura = int(questionary.select(
@@ -990,93 +979,149 @@ def aplicar_filtro_modo():
     ).ask())
 
     total_cores = mp.cpu_count()
-    cpu_padrao = "100" if total_cores <= 2 else "85" if total_cores <= 4 else "60"
+    uso_cpu = int(questionary.text(f"Uso da CPU (%):", default="100").ask())
+    n_proc = max(1, int((uso_cpu / 100) * total_cores))
 
-    uso_cpu_percentual = int(questionary.text(
-        f"Quantos % da CPU deseja utilizar? (ex: {cpu_padrao})",
-        default=cpu_padrao
-    ).ask())
-    uso_cpu_percentual = max(1, min(100, uso_cpu_percentual))
-    n_processos = max(1, int((uso_cpu_percentual / 100) * total_cores))
+    with rasterio.open(raster_path) as src:
+        array = src.read(1)
+        profile = src.profile.copy()
+        nodata = src.nodata
+        altura, largura = array.shape
 
-    total = len(raster_paths)
-    duracoes = []
-    processados_novos = 0
+    blocos = [
+        (array, i, min(i + bloco_altura, altura), nodata, tamanho_janela)
+        for i in range(0, altura, bloco_altura)
+    ]
+    array_filtrado = np.full_like(array, nodata if nodata is not None else 0)
 
-    # Criar pasta de saída
-    pasta_origem = os.path.dirname(raster_paths[0])
+    inicio = time.time()
+    with mp.Pool(processes=n_proc) as pool:
+        for inicio_bloco, resultado in pool.imap(processar_bloco_vertical, blocos):
+            array_filtrado[inicio_bloco:inicio_bloco + resultado.shape[0], :] = resultado
+
+    profile.update(compress='lzw')
+    if nodata is not None:
+        profile.update(nodata=nodata)
+
+    nome_base = os.path.splitext(os.path.basename(raster_path))[0]
+    saida_path = os.path.join(os.path.dirname(raster_path), f"{nome_base}_modo{tamanho_janela}.tif")
+
+    contador = 2
+    while os.path.exists(saida_path):
+        saida_path = os.path.join(os.path.dirname(raster_path), f"{nome_base}_modo{tamanho_janela}({contador}).tif")
+        contador += 1
+
+    with rasterio.open(saida_path, "w", **profile) as dst:
+        dst.write(array_filtrado, 1)
+
+    alerta_conclusao()
+    tempo_total = time.time() - inicio
+    print(f"\n[✅] Filtro aplicado. Arquivo salvo em: {saida_path}")
+    print(f"[⏱] Tempo total: {tempo_total:.2f} segundos")
+
+def wrapper_filtro_raster(args):
+    raster_path, pasta_saida, tamanho_janela = args
+    try:
+        with rasterio.open(raster_path) as src:
+            array = src.read(1)
+            profile = src.profile.copy()
+            nodata = src.nodata
+            altura, largura = array.shape
+
+        array_filtrado = generic_filter(
+            array,
+            lambda p: modo_local(p, nodata),
+            size=tamanho_janela,
+            mode="nearest"
+        )
+
+        nome_base = os.path.splitext(os.path.basename(raster_path))[0]
+        saida_path = os.path.join(pasta_saida, f"{nome_base}_modo{tamanho_janela}.tif")
+        profile.update(compress='lzw')
+        if nodata is not None:
+            profile.update(nodata=nodata)
+
+        with rasterio.open(saida_path, "w", **profile) as dst:
+            dst.write(array_filtrado, 1)
+
+        return f"[✔] {os.path.basename(raster_path)} filtrado"
+    except Exception as e:
+        return f"[⚠️] Erro em {raster_path}: {e}"
+
+def aplicar_filtro_modo_lote():
+    raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione um dos rasters classificados:")
+    pasta_origem = os.path.dirname(raster_exemplo)
+    arquivos = [os.path.join(pasta_origem, f) for f in os.listdir(pasta_origem) if f.lower().endswith(".tif")]
+
+    tamanho_janela = int(questionary.text("Tamanho da janela (ímpar, ex: 3, 5, 7):", default="3").ask())
+    if tamanho_janela % 2 == 0:
+        print("[⚠] A janela deve ser um número ímpar.")
+        return
+
+    total_cores = mp.cpu_count()
+    uso_cpu = int(questionary.text(f"Uso da CPU (%):", default="100").ask())
+    n_proc = max(1, int((uso_cpu / 100) * total_cores))
+
     nome_pasta = os.path.basename(pasta_origem.rstrip("/\\")) + f"-modo{tamanho_janela}"
     pasta_saida = os.path.join(os.path.dirname(pasta_origem), nome_pasta)
     os.makedirs(pasta_saida, exist_ok=True)
 
+    # ✅ Carrega log de arquivos já processados
     caminho_log = os.path.join(pasta_saida, "processados.log")
     processados = set()
     if os.path.exists(caminho_log):
         with open(caminho_log, "r", encoding="utf-8") as f:
             processados = set(linha.strip() for linha in f if linha.strip())
 
-    total_ja_processados = len(processados)
-    inicio_geral = time.time()
+    # ✅ Monta tarefas somente com rasters ainda não processados
+    tarefas = []
+    nomes_saida = []
+    for raster_path in arquivos:
+        nome_base = os.path.splitext(os.path.basename(raster_path))[0]
+        nome_saida = f"{nome_base}_modo{tamanho_janela}.tif"
+        if nome_saida not in processados:
+            tarefas.append((raster_path, pasta_saida, tamanho_janela))
+            nomes_saida.append(nome_saida)
 
-    for idx, raster_path in enumerate(raster_paths):
-        nome = os.path.basename(raster_path)
-        nome_saida_base = f"{os.path.splitext(nome)[0]}_modo{tamanho_janela}.tif"
+    total = len(tarefas)
+    if total == 0:
+        print("[ℹ] Todos os rasters já foram processados anteriormente.")
+        return
 
-        if nome_saida_base in processados:
-            pass  # Já contabilizado
-        else:
-            with rasterio.open(raster_path) as src:
-                array = src.read(1)
-                profile = src.profile.copy()
-                nodata = src.nodata
+    print(f"\n🔁 Iniciando limpeza de ruído em {total} raster(s) com {n_proc} processo(s)...\n")
 
-            altura, largura = array.shape
-            blocos = [
-                (array, i, min(i + bloco_altura, altura), nodata, tamanho_janela)
-                for i in range(0, altura, bloco_altura)
-            ]
+    inicio_total = time.time()
+    duracoes = []
+    concluídos = 0
 
-            array_filtrado = np.full_like(array, nodata if nodata is not None else 0)
-            with mp.Pool(processes=n_processos) as pool:
-                for inicio_bloco, resultado in pool.imap(processar_bloco_vertical, blocos):
-                    array_filtrado[inicio_bloco:inicio_bloco+resultado.shape[0], :] = resultado
+    with ProcessPoolExecutor(max_workers=n_proc) as executor:
+        for idx, resultado in enumerate(tqdm(executor.map(wrapper_filtro_raster, tarefas), total=total, desc="🧼 Filtrando")):
+            nome_saida = nomes_saida[idx]
+            if "[✔]" in resultado:
+                with open(caminho_log, "a", encoding="utf-8") as f:
+                    f.write(nome_saida + "\n")
 
-            if nodata is not None:
-                profile.update(nodata=nodata)
+            print(resultado)
 
-            saida_path = os.path.join(pasta_saida, nome_saida_base)
-            contador = 2
-            while os.path.exists(saida_path):
-                saida_path = os.path.join(pasta_saida, f"{os.path.splitext(nome)[0]}_modo{tamanho_janela}({contador}).tif")
-                contador += 1
+            concluídos += 1
+            tempo_decorrido = int(time.time() - inicio_total)
+            tempo_medio = tempo_decorrido / concluídos
+            restante = total - concluídos
+            estimado_restante = int(tempo_medio * restante)
+            estimado_total = int(tempo_decorrido + estimado_restante)
 
-            with rasterio.open(saida_path, "w", **profile) as dst:
-                dst.write(array_filtrado, 1)
-
-            with open(caminho_log, "a", encoding="utf-8") as f:
-                f.write(os.path.basename(saida_path) + "\n")
-
-            duracao = time.time() - inicio_geral
-            duracoes.append(duracao)
-            processados_novos += 1
-
-        # Atualiza resumo geral no terminal
-        tempo_decorrido = time.time() - inicio_geral
-        tempo_medio = sum(duracoes) / len(duracoes) if duracoes else 0
-        restantes = total - (idx + 1)
-        estimativa_restante = tempo_medio * restantes
-        tempo_estimado_total = tempo_decorrido + estimativa_restante
-
-        Limpar()
-        print(f"[🧠] Filtro de modo ({total_ja_processados + processados_novos}/{total}) - janela {tamanho_janela} pixels")
-        print(f"    CPU: {uso_cpu_percentual}% com {n_processos} processo(s)")
-        print(f"    Bloco vertical: {bloco_altura} linhas")
-        print(f"    Tempo decorrido: {int(tempo_decorrido)}s (~{tempo_decorrido/60:.1f} min)")
-        print(f"    Estimado restante: {int(estimativa_restante)}s (~{estimativa_restante/60:.1f} min)")
-        print(f"    Estimativa total: {int(tempo_estimado_total)}s (~{tempo_estimado_total/60:.1f} min)\n")
+            Limpar()
+            print(f"\n📊 LIMPEZA DE RUÍDO EM LOTE")
+            print(f"Rasters processados: {concluídos}/{total}")
+            print(f"Tempo decorrido: {tempo_decorrido}s ({tempo_decorrido // 60} min)")
+            print(f"Tempo estimado para finalizar: {estimado_restante}s ({estimado_restante // 60} min)")
+            print(f"Tempo total estimado: {estimado_total}s ({estimado_total // 60} min)\n")
 
     alerta_conclusao()
-    print("\n[✅] Todos os filtros foram aplicados com sucesso.")
+    tempo_total = int(time.time() - inicio_total)
+    print(f"[✅] Todos os filtros foram aplicados. Rasters salvos em: {pasta_saida}")
+    print(f"[📄] Log salvo em: {caminho_log}")
+    print(f"[⏱] Tempo total de execução: {tempo_total}s ({tempo_total // 60} min)")
 
 ## Matrizes de confusão
 
@@ -1266,13 +1311,21 @@ def submenu_analisar():
     ]
     submenu(titulo, opcoes_submenu)
 
+def submenu_limpar_ruido():
+    titulo = "🧼 Redução de Ruído - Escolha uma opção:"
+    opcoes_submenu = [
+        ("📄 Aplicar filtro em um único raster", aplicar_filtro_modo_individual),
+        ("📁 Aplicar filtro em lote (todos da pasta)", aplicar_filtro_modo_lote),
+    ]
+    submenu(titulo, opcoes_submenu)
+
 # === Menu principal ===
 def menu():
     exibir_banner()
     opcoes = [
         ("🧠 Treinar modelo", treinar_modelo),
         ("🧮 Classificar raster (individual ou em grupo)", classificar_imagem),
-        ("🧼 Limpar ruído", aplicar_filtro_modo),
+        ("🧼 Limpar ruído", submenu_limpar_ruido),
         ("🧩 Segmentação e unificação de raster", submenu_segmentacao),
         ("🔎 Analisar raster", submenu_analisar),
         ("📊 Matrizes de confusão", submenu_matriz),
