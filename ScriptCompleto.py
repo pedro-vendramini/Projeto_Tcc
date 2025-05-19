@@ -1451,12 +1451,15 @@ def preencher_buracos_com_vizinhanca():
         print("[⚠] A janela deve ser um número ímpar.")
         return
 
+    margem = tamanho_janela // 2
+
     print("🔄 Iniciando preenchimento de buracos...")
+    print("🔄 Coletando pixels que estão vazios")
     with rasterio.open(raster_path) as src:
         perfil = src.profile.copy()
         array = src.read(1)
         altura, largura = array.shape
-        nodata = src.nodata if src.nodata is not None else 255  # fallback para uint8
+        nodata = src.nodata if src.nodata is not None else 255
 
         if usar_mascara:
             gdf = gpd.read_file(vetor_path)
@@ -1465,32 +1468,36 @@ def preencher_buracos_com_vizinhanca():
         else:
             mask_area = np.ones_like(array, dtype=bool)
 
-        buracos = (array == 0) | (array == nodata)
-        mascara_preenchimento = buracos & mask_area
+        # Máscara dos buracos válidos
+        buracos = ((array == 0) | (array == nodata)) & mask_area
+        linhas, colunas = np.where(buracos)
 
-        print("🧠 Aplicando filtro de vizinhança (pode demorar)...")
-        array_filtro = generic_filter(array, lambda p: modo_local_preencher(p, nodata), size=tamanho_janela, mode="nearest")
+        if len(linhas) == 0:
+            print("[ℹ] Nenhum pixel para preencher.")
+            return
 
         array_corrigido = array.copy()
-        linhas, colunas = np.where(mascara_preenchimento)
-        total = len(linhas)
 
-        print("🎯 Substituindo pixels com base no resultado do filtro...")
-        for i in tqdm(range(total), desc="Preenchendo", unit="px"):
+        print(f"🎯 Preenchendo {len(linhas)} pixel(s) com janelas locais...")
+        for i in tqdm(range(len(linhas)), desc="Preenchendo", unit="px"):
             y, x = linhas[i], colunas[i]
-            array_corrigido[y, x] = array_filtro[y, x]
+            y1, y2 = max(0, y - margem), min(altura, y + margem + 1)
+            x1, x2 = max(0, x - margem), min(largura, x + margem + 1)
 
+            janela = array[y1:y2, x1:x2]
+            valor = modo_local_preencher(janela.flatten(), nodata)
+            array_corrigido[y, x] = valor
+
+    # Salvar resultado
     sufixo = "-preenchido-area" if usar_mascara else "-preenchido-total"
     nome_base = os.path.splitext(os.path.basename(raster_path))[0]
-    saida_base = os.path.join(os.path.dirname(raster_path), f"{nome_base}{sufixo}.tif")
-    caminho_saida = saida_base
+    caminho_saida = os.path.join(os.path.dirname(raster_path), f"{nome_base}{sufixo}.tif")
     contador = 2
     while os.path.exists(caminho_saida):
         caminho_saida = os.path.join(os.path.dirname(raster_path), f"{nome_base}{sufixo}({contador}).tif")
         contador += 1
 
     perfil.update(compress="lzw", nodata=nodata)
-
     with rasterio.open(caminho_saida, "w", **perfil) as dst:
         dst.write(array_corrigido, 1)
 
