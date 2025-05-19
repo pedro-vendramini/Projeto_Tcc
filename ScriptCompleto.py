@@ -2,36 +2,31 @@
 import os
 import sys
 import time
-import winsound
 import platform
+import pickle
+import multiprocessing as mp
+import winsound
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-import multiprocessing as mp
 
 # === Bibliotecas de terceiros ===
 import numpy as np
-import geopandas as gpd
+import pandas as pd
 import questionary
-from questionary import Style
 from joblib import dump, load
-from tqdm import tqdm
+from questionary import Style
+from scipy.ndimage import generic_filter
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.utils import resample
-from scipy.ndimage import generic_filter
+from tqdm import tqdm
 
 # === Bibliotecas específicas de geoprocessamento ===
+import geopandas as gpd
 import rasterio
-from rasterio.windows import Window
+from rasterio.features import rasterize
 from rasterio.mask import mask
 from rasterio.merge import merge
-from rasterio.features import rasterize
-
-import rasterio
-import geopandas as gpd
-import pandas as pd
-from rasterio.mask import mask
-import os
-import questionary
+from rasterio.windows import Window
 
 # === Configurações de estilo ===
 cores_ansi = {
@@ -171,7 +166,10 @@ def Limpar(banner=True):
     if banner:
         exibir_banner()
 
-# === Funções do programa ===
+### Funções do programa ###
+
+## Treinar modelo
+
 def treinar_modelo():
     vetor_amostras = selecionar_arquivo_com_extensoes([".gpkg"], mensagem="Selecione o arquivo de amostras (GPKG):")
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster de entrada (TIF):")
@@ -239,49 +237,39 @@ def treinar_modelo():
     alerta_conclusao()
     print(f"[✔] Modelo salvo com sucesso: {caminho_modelo}")
 
-## === Calssificação de imagens ===
-def classificar_imagem_thread():
+## Calssificação de imagens
+
+def configurar_classificacao_individual():
     modelo_path = selecionar_arquivo_com_extensoes([".pkl"], mensagem="Selecione o modelo .pkl treinado:")
     raster_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster a ser classificado (TIF):")
 
     total_cores = os.cpu_count() or 1
-    if total_cores >= 8:
-        bloco_padrao = "2048"
-    elif total_cores >= 4:
-        bloco_padrao = "1024"
-    else:
-        bloco_padrao = "512"
+    bloco_padrao = "2048" if total_cores >= 8 else "1024" if total_cores >= 4 else "512"
+    cpu_padrao = "100" if total_cores <= 2 else "85" if total_cores <= 4 else "60"
 
     print("\n📌 O 'tamanho do bloco' define o pedaço da imagem que será processado por vez.")
-    print("Valores maiores aceleram o processo, mas exigem mais memória.")
-    print("Valores menores são mais seguros, mas mais lentos.\n")
     tamanho_bloco = int(questionary.select(
         "Escolha o tamanho dos blocos (em pixels):",
         choices=["512", "1024", "2048", "4096"],
-        default=bloco_padrao, 
+        default=bloco_padrao,
         style=estilo_personalizado_selecao
     ).ask())
 
-    if total_cores <= 2:
-        cpu_padrao = "100"
-    elif total_cores <= 4:
-        cpu_padrao = "85"
-    else:
-        cpu_padrao = "60"
-
-    print("\n⚙️  O uso de CPU define quantas threads serão usadas para paralelizar o processamento.")
-    print("Valores altos aceleram, mas consomem mais recursos (pode aquecer o PC ou travar outras tarefas).")
-    print("💡 Recomendado: 60% para uso geral. Use 100% apenas se não estiver usando o computador para mais nada.\n")
-
-    uso_cpu_percentual = int(questionary.text(f"Quantos % da CPU deseja utilizar? (ex: {cpu_padrao})", default=cpu_padrao).ask())
+    print("\n⚙️  O uso de CPU define quantas threads/processos serão usados para paralelizar o processamento.")
+    uso_cpu_percentual = int(questionary.text(
+        f"Quantos % da CPU deseja utilizar? (ex: {cpu_padrao})", default=cpu_padrao
+    ).ask())
     uso_cpu_percentual = max(1, min(100, uso_cpu_percentual))
-
     n_threads = max(1, int((uso_cpu_percentual / 100) * total_cores))
+
+    return modelo_path, raster_entrada, tamanho_bloco, uso_cpu_percentual, n_threads
+
+def classificar_imagem_thread(modelo_path, raster_entrada, tamanho_bloco, uso_cpu_percentual, n_threads):
     nome_base, extensao = os.path.splitext(raster_entrada)
     raster_saida_base = f"{nome_base}-classificado"
     raster_saida = raster_saida_base + extensao
     contador = 1
-  
+
     while os.path.exists(raster_saida):
         raster_saida = f"{raster_saida_base}-v{contador}{extensao}"
         contador += 1
@@ -342,57 +330,30 @@ def classificar_imagem_thread():
     alerta_conclusao()
     print(f"[📝] Relatório salvo como: {relatorio_saida}")
 
-def classificar_bloco_serializado(args):
-    window, bloco, nodata, modelo_bytes = args
-    import pickle
-    modelo = pickle.loads(modelo_bytes)
-    bloco = bloco.transpose(1, 2, 0)
-    mascara_valida = ~(np.all(bloco == 0, axis=2))
-    matriz_saida = np.zeros((bloco.shape[0], bloco.shape[1]), dtype='uint8')
-    if np.any(mascara_valida):
-        bloco_2d = bloco[mascara_valida]
-        previsoes = modelo.predict(bloco_2d)
-        matriz_saida[mascara_valida] = previsoes.astype('uint8')
-    return (window, matriz_saida)
+def classificar_imagem_pool(modelo_path, raster_entrada, tamanho_bloco, uso_cpu_percentual, n_threads):
+    def classificar_bloco_serializado(args):
+        window, bloco, nodata, modelo_bytes = args
+        modelo = pickle.loads(modelo_bytes)
+        bloco = bloco.transpose(1, 2, 0)
+        mascara_valida = ~(np.all(bloco == 0, axis=2))
+        matriz_saida = np.zeros((bloco.shape[0], bloco.shape[1]), dtype='uint8')
+        if np.any(mascara_valida):
+            bloco_2d = bloco[mascara_valida]
+            previsoes = modelo.predict(bloco_2d)
+            matriz_saida[mascara_valida] = previsoes.astype('uint8')
+        return (window, matriz_saida)
 
-def classificar_imagem_pool():
-    modelo_path = selecionar_arquivo_com_extensoes([".pkl"], mensagem="Selecione o modelo .pkl treinado:")
-    raster_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster a ser classificado (TIF):")
-
-    total_cores = os.cpu_count() or 1
-    bloco_padrao = "2048" if total_cores >= 8 else "1024" if total_cores >= 4 else "512"
-
-    print("\n📌 O 'tamanho do bloco' define o pedaço da imagem que será processado por vez.")
-    print("Valores maiores aceleram o processo, mas exigem mais memória.")
-    print("Valores menores são mais seguros, mas mais lentos.\n")
-    tamanho_bloco = int(questionary.select(
-        "Escolha o tamanho dos blocos (em pixels):",
-        choices=["512", "1024", "2048", "4096"],
-        default=bloco_padrao, 
-        style=estilo_personalizado_selecao
-    ).ask())
-
-    cpu_padrao = "100" if total_cores <= 2 else "85" if total_cores <= 4 else "60"
-
-    print("\n⚙️  O uso de CPU define quantas threads serão usadas para paralelizar o processamento.")
-    print("Valores altos aceleram, mas consomem mais recursos (pode aquecer o PC ou travar outras tarefas).")
-    print("💡 Recomendado: 60% para uso geral. Use 100% apenas se não estiver usando o computador para mais nada.\n")
-
-    uso_cpu_percentual = int(questionary.text(f"Quantos % da CPU deseja utilizar? (ex: {cpu_padrao})", default=cpu_padrao).ask())
-    uso_cpu_percentual = max(1, min(100, uso_cpu_percentual))
-
-    n_threads = max(1, int((uso_cpu_percentual / 100) * total_cores))
     nome_base, extensao = os.path.splitext(raster_entrada)
     raster_saida_base = f"{nome_base}-classificado"
     raster_saida = raster_saida_base + extensao
     contador = 1
+
     while os.path.exists(raster_saida):
         raster_saida = f"{raster_saida_base}-v{contador}{extensao}"
         contador += 1
     relatorio_saida = raster_saida.replace(extensao, "-relatorio.txt")
 
     print(f"\n[1] Carregando modelo com {n_threads} processo(s)...")
-    import pickle
     modelo = load(modelo_path)
     modelo_bytes = pickle.dumps(modelo)
 
@@ -438,7 +399,30 @@ def classificar_imagem_pool():
     alerta_conclusao()
     print(f"[📝] Relatório salvo como: {relatorio_saida}")
 
-### Classificação de imagem em grupo - inicio
+def classificar_imagem():
+    tipo = questionary.select(
+        "Deseja classificar uma única imagem ou em grupo?",
+        choices=["📄 Classificar uma imagem", "📁 Classificar várias imagens (grupo)"],
+        style=estilo_personalizado_selecao
+    ).ask()
+
+    if tipo == "📁 Classificar várias imagens (grupo)":
+        return classificar_rasters_segmentados()
+
+    modo = questionary.select(
+        "Deseja usar ProcessPool (mais pesado) ou ThreadPool (mais leve)?",
+        choices=["🔀 ThreadPool (rápido, para modelos leves)", "🔁 ProcessPool (melhor para modelos pesados)"],
+        style=estilo_personalizado_selecao
+    ).ask()
+
+    modelo_path, raster_entrada, tamanho_bloco, uso_cpu_percentual, n_threads = configurar_classificacao_individual()
+
+    if "ThreadPool" in modo:
+        return classificar_imagem_thread(modelo_path, raster_entrada, tamanho_bloco, uso_cpu_percentual, n_threads)
+    else:
+        return classificar_imagem_pool(modelo_path, raster_entrada, tamanho_bloco, uso_cpu_percentual, n_threads)
+
+## Classificação de imagem em grupo - inicio
 
 def classificar_rasters_segmentados():
     modelo_path = selecionar_arquivo_com_extensoes([".pkl"], mensagem="Selecione o modelo .pkl treinado:")
@@ -551,101 +535,7 @@ def classificar_rasters_segmentados():
 
     alerta_conclusao()
 
-### Classificação de imagem em grupo - fim
-
-def remover_banda_4():
-    nome_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o arquivo TIFF (ex: imagem.tif):")
-    entrada = os.path.abspath(nome_entrada)
-    nome_base, extensao = os.path.splitext(nome_entrada)
-    saida = f"{nome_base}_RGB{extensao}"
-
-    with rasterio.open(entrada) as src:
-        if src.count < 3:
-            raise ValueError("A imagem não possui ao menos 3 bandas (RGB).")
-        profile = src.profile
-        profile.update(count=3)
-        with rasterio.open(saida, 'w', **profile) as dst:
-            for i in range(1, 4):
-                dst.write(src.read(i), i)
-
-    alerta_conclusao()
-    print(f"[✔] Imagem salva sem banda alfa como: {saida}")
-
-def comparar_rasters():
-    raster1 = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o primeiro raster:")
-    raster2 = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o segundo raster:")
-    pasta_script = os.path.dirname(os.path.abspath(__file__))
-
-    with rasterio.open(raster1) as src1, rasterio.open(raster2) as src2:
-        if src1.shape != src2.shape or src1.transform != src2.transform:
-            raise ValueError("Os rasters não têm a mesma dimensão ou transformação espacial.")
-
-        array1 = src1.read(1)
-        array2 = src2.read(1)
-        mask_valid = np.ones(array1.shape, dtype=bool)
-        if src1.nodata is not None:
-            mask_valid &= array1 != src1.nodata
-        if src2.nodata is not None:
-            mask_valid &= array2 != src2.nodata
-
-        iguais = (array1 == array2) & mask_valid
-        diferentes = (~iguais) & mask_valid
-        total_validos = np.sum(mask_valid)
-        total_iguais = np.sum(iguais)
-        total_diferentes = total_validos - total_iguais
-        percentual = (total_iguais / total_validos) * 100 if total_validos > 0 else 0.0
-
-        data_str = datetime.now().strftime("%Y_%m_%d_%Hh%Mm%Ss")
-
-        print("\n📊 RESULTADO DA COMPARAÇÃO")
-        print(f"Raster 1: {raster1}")
-        print(f"Raster 2: {raster2}")
-        print(f"Total de pixels válidos: {total_validos}")
-        print(f"Pixels iguais: {total_iguais}")
-        print(f"Pixels diferentes: {total_diferentes}")
-        print(f"Percentual de igualdade: {percentual:.2f}%")
-
-        salvar_relatorio = questionary.select(
-            "Deseja salvar o relatório da comparação?",
-            choices=["Sim", "Não"],
-            default="Sim", 
-            style=estilo_personalizado_selecao
-        ).ask() == "Sim"
-
-        salvar_raster_diferencas = questionary.select(
-            "Deseja gerar o raster de diferenças?",
-            choices=["Sim", "Não"],
-            default="Sim", 
-            style=estilo_personalizado_selecao
-        ).ask() == "Sim"
-
-        if salvar_relatorio:
-            relatorio_path = os.path.join(pasta_script, f"relatorio_comparacao_{data_str}.txt")
-            with open(relatorio_path, "w", encoding="utf-8") as f:
-                f.write("RELATÓRIO DE COMPARAÇÃO DE RASTERS\n")
-                f.write(f"Data e hora: {datetime.now()}\n")
-                f.write(f"Raster 1: {raster1}\n")
-                f.write(f"Raster 2: {raster2}\n")
-                f.write(f"Total válidos: {total_validos}\n")
-                f.write(f"Pixels iguais: {total_iguais}\n")
-                f.write(f"Pixels diferentes: {total_diferentes}\n")
-                f.write(f"Percentual de igualdade: {percentual:.2f}%\n")
-            print(f"[📝] Relatório salvo em: {relatorio_path}")
-
-        if salvar_raster_diferencas:
-            dif_array = np.full(array1.shape, 255, dtype=np.uint8)
-            dif_array[iguais] = 0
-            dif_array[diferentes] = 1
-            profile = src1.profile
-            profile.update(dtype=rasterio.uint8, count=1, nodata=255)
-
-            diferencas_path = os.path.join(pasta_script, f"diferencas_{data_str}.tif")
-            with rasterio.open(diferencas_path, "w", **profile) as dst:
-                dst.write(dif_array, 1)
-            print(f"[🗺️] Raster de diferenças salvo como: {diferencas_path}")
-
-        alerta_conclusao()
-        print("\n[✔] Comparação concluída.")
+## Segmentações e uniões
 
 def segmentar_raster_em_blocos():
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster a ser segmentado:")
@@ -743,6 +633,62 @@ def unir_rasters_em_mosaico():
     alerta_conclusao()
     print(f"[✔] Mosaico salvo como: {saida_path}")
 
+def segmentar_raster_por_vetor():
+    raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster que será segmentado pelas feições do vetor:")
+    vetor_path = selecionar_arquivo_com_extensoes([".gpkg"], mensagem="Selecione o vetor com as feições (GPKG):")
+
+    gdf = gpd.read_file(vetor_path)
+    campos = [col for col in gdf.columns if col != "geometry"]
+
+    if not campos:
+        print("[⚠] Nenhum campo não-geométrico encontrado no vetor.")
+        return
+
+    campo_id = questionary.select("Selecione o campo que será usado para nomear os arquivos:", choices=campos).ask()
+
+    base_raster_name = os.path.splitext(os.path.basename(raster_path))[0]
+    saida_dir = os.path.join(os.path.dirname(raster_path), f"{base_raster_name}_segmentado_por_vetor")
+    os.makedirs(saida_dir, exist_ok=True)
+
+    with rasterio.open(raster_path) as src:
+        for idx, row in gdf.iterrows():
+            geom = [row.geometry.__geo_interface__]
+            try:
+                out_image, out_transform = mask(src, geom, crop=True)
+            except Exception as e:
+                print(f"[❌] Erro ao recortar feição {idx}: {e}")
+                continue
+
+            if (out_image == 0).all():
+                print(f"[⚠] Segmento ignorado (somente valores 0) para feição {idx}.")
+                continue
+
+            out_meta = src.meta.copy()
+            out_meta.update({
+                "driver": "GTiff",
+                "height": out_image.shape[1],
+                "width": out_image.shape[2],
+                "transform": out_transform
+            })
+
+            valor_base = str(row[campo_id]).replace("/", "-").replace(" ", "_")
+            nome_arquivo = f"{campo_id}_{valor_base}.tif"
+            saida_path = os.path.join(saida_dir, nome_arquivo)
+            contador = 2
+            while os.path.exists(saida_path):
+                nome_arquivo = f"{campo_id}_{valor_base}-{contador}.tif"
+                saida_path = os.path.join(saida_dir, nome_arquivo)
+                contador += 1
+
+            with rasterio.open(saida_path, "w", **out_meta) as dest:
+                dest.write(out_image)
+
+            print(f"[✔] Segmento salvo: {saida_path}")
+
+    alerta_conclusao()
+    print(f"[✔] Segmentos salvos na pasta: {saida_dir}")
+
+## Analises
 def analisar_raster():
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado para análise estatística:")
 
@@ -783,7 +729,210 @@ def analisar_raster():
         alerta_conclusao()
         print(f"[📊] Relatório gerado: {relatorio_path}")
 
-### REDUÇÃO DE RUÍDO ###
+def gerar_relatorio_area_segmentos():
+    pasta_segmentos = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione um dos rasters segmentados para definir a pasta:")
+    pasta_segmentos = os.path.dirname(pasta_segmentos)
+    arquivos_tif = [f for f in os.listdir(pasta_segmentos) if f.lower().endswith(".tif")]
+
+    if not arquivos_tif:
+        print("[⚠] Nenhum arquivo .tif encontrado na pasta.")
+        return
+
+    print(f"[📂] Analisando {len(arquivos_tif)} arquivos .tif na pasta: {pasta_segmentos}")
+    relatorio = []
+    todas_classes = set()
+    registros_por_arquivo = {}
+
+    for arquivo in tqdm(arquivos_tif, desc="Processando rasters"):
+        caminho = os.path.join(pasta_segmentos, arquivo)
+        with rasterio.open(caminho) as src:
+            array = src.read(1)
+            transform = src.transform
+            res_x, res_y = transform[0], -transform[4]
+            area_pixel_km2 = (res_x * res_y) / 1_000_000
+
+            classes, contagens = np.unique(array, return_counts=True)
+            total_pixels = 0
+            info = {"arquivo": arquivo}
+
+            for classe, contagem in zip(classes, contagens):
+                if classe == 0:
+                    continue
+                todas_classes.add(classe)
+                info[f"{classe}_px"] = contagem
+                info[f"{classe}_km2"] = round(contagem * area_pixel_km2, 4)
+                total_pixels += contagem
+
+            info["total_px"] = total_pixels
+            info["total_km2"] = round(total_pixels * area_pixel_km2, 4)
+
+            registros_por_arquivo[arquivo] = info
+
+    # Cálculo de percentuais após conhecer todas as classes
+    for info in registros_por_arquivo.values():
+        total = info.get("total_px", 0)
+        for classe in todas_classes:
+            key_px = f"{classe}_px"
+            key_pct = f"{classe}_pct"
+            if key_px in info:
+                info[key_pct] = round(100 * info[key_px] / total, 2)
+            else:
+                info[f"{classe}_px"] = 0
+                info[f"{classe}_km2"] = 0.0
+                info[key_pct] = 0.0
+        relatorio.append(info)
+
+    colunas = ["arquivo"]
+    for classe in sorted(todas_classes):
+        colunas.append(f"{classe}_px")
+    colunas.append("total_px")
+    for classe in sorted(todas_classes):
+        colunas.append(f"{classe}_km2")
+    colunas.append("total_km2")
+    for classe in sorted(todas_classes):
+        colunas.append(f"{classe}_pct")
+
+    df = pd.DataFrame(relatorio)[colunas]
+    nome_saida = os.path.join(pasta_segmentos, "relatorio_areas_segmentadas.xlsx")
+    df.to_excel(nome_saida, index=False)
+    print(f"[📄] Relatório salvo em: {nome_saida}")
+
+def comparar_rasters():
+    raster1 = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o primeiro raster:")
+    raster2 = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o segundo raster:")
+    pasta_script = os.path.dirname(os.path.abspath(__file__))
+
+    with rasterio.open(raster1) as src1, rasterio.open(raster2) as src2:
+        if src1.shape != src2.shape or src1.transform != src2.transform:
+            raise ValueError("Os rasters não têm a mesma dimensão ou transformação espacial.")
+
+        array1 = src1.read(1)
+        array2 = src2.read(1)
+        mask_valid = np.ones(array1.shape, dtype=bool)
+        if src1.nodata is not None:
+            mask_valid &= array1 != src1.nodata
+        if src2.nodata is not None:
+            mask_valid &= array2 != src2.nodata
+
+        iguais = (array1 == array2) & mask_valid
+        diferentes = (~iguais) & mask_valid
+        total_validos = np.sum(mask_valid)
+        total_iguais = np.sum(iguais)
+        total_diferentes = total_validos - total_iguais
+        percentual = (total_iguais / total_validos) * 100 if total_validos > 0 else 0.0
+
+        data_str = datetime.now().strftime("%Y_%m_%d_%Hh%Mm%Ss")
+
+        print("\n📊 RESULTADO DA COMPARAÇÃO")
+        print(f"Raster 1: {raster1}")
+        print(f"Raster 2: {raster2}")
+        print(f"Total de pixels válidos: {total_validos}")
+        print(f"Pixels iguais: {total_iguais}")
+        print(f"Pixels diferentes: {total_diferentes}")
+        print(f"Percentual de igualdade: {percentual:.2f}%")
+
+        salvar_relatorio = questionary.select(
+            "Deseja salvar o relatório da comparação?",
+            choices=["Sim", "Não"],
+            default="Sim", 
+            style=estilo_personalizado_selecao
+        ).ask() == "Sim"
+
+        salvar_raster_diferencas = questionary.select(
+            "Deseja gerar o raster de diferenças?",
+            choices=["Sim", "Não"],
+            default="Sim", 
+            style=estilo_personalizado_selecao
+        ).ask() == "Sim"
+
+        if salvar_relatorio:
+            relatorio_path = os.path.join(pasta_script, f"relatorio_comparacao_{data_str}.txt")
+            with open(relatorio_path, "w", encoding="utf-8") as f:
+                f.write("RELATÓRIO DE COMPARAÇÃO DE RASTERS\n")
+                f.write(f"Data e hora: {datetime.now()}\n")
+                f.write(f"Raster 1: {raster1}\n")
+                f.write(f"Raster 2: {raster2}\n")
+                f.write(f"Total válidos: {total_validos}\n")
+                f.write(f"Pixels iguais: {total_iguais}\n")
+                f.write(f"Pixels diferentes: {total_diferentes}\n")
+                f.write(f"Percentual de igualdade: {percentual:.2f}%\n")
+            print(f"[📝] Relatório salvo em: {relatorio_path}")
+
+        if salvar_raster_diferencas:
+            dif_array = np.full(array1.shape, 255, dtype=np.uint8)
+            dif_array[iguais] = 0
+            dif_array[diferentes] = 1
+            profile = src1.profile
+            profile.update(dtype=rasterio.uint8, count=1, nodata=255)
+
+            diferencas_path = os.path.join(pasta_script, f"diferencas_{data_str}.tif")
+            with rasterio.open(diferencas_path, "w", **profile) as dst:
+                dst.write(dif_array, 1)
+            print(f"[🗺️] Raster de diferenças salvo como: {diferencas_path}")
+
+        alerta_conclusao()
+        print("\n[✔] Comparação concluída.")
+
+def verificar_resolucao_raster():
+    modo = questionary.select(
+        "Deseja verificar a resolução de um único raster ou de todos os rasters em uma pasta?",
+        choices=["📄 Analisar um único raster", "📁 Analisar todos os rasters de uma pasta"],
+        style=estilo_personalizado_selecao
+    ).ask()
+
+    resultados = []
+
+    if modo == "📄 Analisar um único raster":
+        raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster para verificar a resolução:")
+        with rasterio.open(raster_path) as src:
+            transform = src.transform
+            res_x, res_y = transform[0], -transform[4]
+        resultados.append((os.path.basename(raster_path), res_x, res_y))
+
+    else:
+        raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione qualquer raster da pasta desejada:")
+        pasta = os.path.dirname(raster_exemplo)
+        arquivos_tif = [f for f in sorted(os.listdir(pasta)) if f.lower().endswith(".tif")]
+
+        for nome in arquivos_tif:
+            caminho = os.path.join(pasta, nome)
+            try:
+                with rasterio.open(caminho) as src:
+                    transform = src.transform
+                    res_x, res_y = transform[0], -transform[4]
+                resultados.append((nome, res_x, res_y))
+            except:
+                resultados.append((nome, None, None))
+
+    # Exibir resumo
+    print("\n📊 RESUMO DAS RESOLUÇÕES:")
+    for nome, res_x, res_y in resultados:
+        if res_x is not None:
+            print(f"🗂️ {nome} → {res_x:.4f}m x {res_y:.4f}m (área: {res_x * res_y:.4f} m²)")
+        else:
+            print(f"⚠️ {nome} → Erro ao abrir ou ler o raster.")
+
+    alerta_conclusao()
+
+def remover_banda_4():
+    nome_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o arquivo TIFF (ex: imagem.tif):")
+    entrada = os.path.abspath(nome_entrada)
+    nome_base, extensao = os.path.splitext(nome_entrada)
+    saida = f"{nome_base}_RGB{extensao}"
+
+    with rasterio.open(entrada) as src:
+        if src.count < 3:
+            raise ValueError("A imagem não possui ao menos 3 bandas (RGB).")
+        profile = src.profile
+        profile.update(count=3)
+        with rasterio.open(saida, 'w', **profile) as dst:
+            for i in range(1, 4):
+                dst.write(src.read(i), i)
+
+    alerta_conclusao()
+    print(f"[✔] Imagem salva sem banda alfa como: {saida}")
+
+## Redução de ruído
 
 def modo_local(pixels, nodata):
     try:
@@ -924,8 +1073,7 @@ def aplicar_filtro_modo():
     alerta_conclusao()
     print("\n[✅] Todos os filtros foram aplicados com sucesso.")
 
-
-### MATRIZ DE CONFUSÃO ###
+## Matrizes de confusão
 
 def gerar_matriz_confusao_raster():
     from sklearn.metrics import confusion_matrix, classification_report, accuracy_score # Importado na função para deixar o inicio mais leve
@@ -1068,180 +1216,13 @@ def gerar_matriz_confusao_vetor():
     alerta_conclusao()
     print(f"\n[💾] Relatório salvo como: {nome_saida}")
 
-### SEGMENTAR POR VETOR ###
-
-def segmentar_raster_por_vetor():
-    raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster que será segmentado pelas feições do vetor:")
-    vetor_path = selecionar_arquivo_com_extensoes([".gpkg"], mensagem="Selecione o vetor com as feições (GPKG):")
-
-    gdf = gpd.read_file(vetor_path)
-    campos = [col for col in gdf.columns if col != "geometry"]
-
-    if not campos:
-        print("[⚠] Nenhum campo não-geométrico encontrado no vetor.")
-        return
-
-    campo_id = questionary.select("Selecione o campo que será usado para nomear os arquivos:", choices=campos).ask()
-
-    base_raster_name = os.path.splitext(os.path.basename(raster_path))[0]
-    saida_dir = os.path.join(os.path.dirname(raster_path), f"{base_raster_name}_segmentado_por_vetor")
-    os.makedirs(saida_dir, exist_ok=True)
-
-    with rasterio.open(raster_path) as src:
-        for idx, row in gdf.iterrows():
-            geom = [row.geometry.__geo_interface__]
-            try:
-                out_image, out_transform = mask(src, geom, crop=True)
-            except Exception as e:
-                print(f"[❌] Erro ao recortar feição {idx}: {e}")
-                continue
-
-            if (out_image == 0).all():
-                print(f"[⚠] Segmento ignorado (somente valores 0) para feição {idx}.")
-                continue
-
-            out_meta = src.meta.copy()
-            out_meta.update({
-                "driver": "GTiff",
-                "height": out_image.shape[1],
-                "width": out_image.shape[2],
-                "transform": out_transform
-            })
-
-            valor_base = str(row[campo_id]).replace("/", "-").replace(" ", "_")
-            nome_arquivo = f"{campo_id}_{valor_base}.tif"
-            saida_path = os.path.join(saida_dir, nome_arquivo)
-            contador = 2
-            while os.path.exists(saida_path):
-                nome_arquivo = f"{campo_id}_{valor_base}-{contador}.tif"
-                saida_path = os.path.join(saida_dir, nome_arquivo)
-                contador += 1
-
-            with rasterio.open(saida_path, "w", **out_meta) as dest:
-                dest.write(out_image)
-
-            print(f"[✔] Segmento salvo: {saida_path}")
-
-    alerta_conclusao()
-    print(f"[✔] Segmentos salvos na pasta: {saida_dir}")
-
-def gerar_relatorio_area_segmentos():
-    pasta_segmentos = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione um dos rasters segmentados para definir a pasta:")
-    pasta_segmentos = os.path.dirname(pasta_segmentos)
-    arquivos_tif = [f for f in os.listdir(pasta_segmentos) if f.lower().endswith(".tif")]
-
-    if not arquivos_tif:
-        print("[⚠] Nenhum arquivo .tif encontrado na pasta.")
-        return
-
-    print(f"[📂] Analisando {len(arquivos_tif)} arquivos .tif na pasta: {pasta_segmentos}")
-    relatorio = []
-    todas_classes = set()
-    registros_por_arquivo = {}
-
-    for arquivo in tqdm(arquivos_tif, desc="Processando rasters"):
-        caminho = os.path.join(pasta_segmentos, arquivo)
-        with rasterio.open(caminho) as src:
-            array = src.read(1)
-            transform = src.transform
-            res_x, res_y = transform[0], -transform[4]
-            area_pixel_km2 = (res_x * res_y) / 1_000_000
-
-            classes, contagens = np.unique(array, return_counts=True)
-            total_pixels = 0
-            info = {"arquivo": arquivo}
-
-            for classe, contagem in zip(classes, contagens):
-                if classe == 0:
-                    continue
-                todas_classes.add(classe)
-                info[f"{classe}_px"] = contagem
-                info[f"{classe}_km2"] = round(contagem * area_pixel_km2, 4)
-                total_pixels += contagem
-
-            info["total_px"] = total_pixels
-            info["total_km2"] = round(total_pixels * area_pixel_km2, 4)
-
-            registros_por_arquivo[arquivo] = info
-
-    # Cálculo de percentuais após conhecer todas as classes
-    for info in registros_por_arquivo.values():
-        total = info.get("total_px", 0)
-        for classe in todas_classes:
-            key_px = f"{classe}_px"
-            key_pct = f"{classe}_pct"
-            if key_px in info:
-                info[key_pct] = round(100 * info[key_px] / total, 2)
-            else:
-                info[f"{classe}_px"] = 0
-                info[f"{classe}_km2"] = 0.0
-                info[key_pct] = 0.0
-        relatorio.append(info)
-
-    colunas = ["arquivo"]
-    for classe in sorted(todas_classes):
-        colunas.append(f"{classe}_px")
-    colunas.append("total_px")
-    for classe in sorted(todas_classes):
-        colunas.append(f"{classe}_km2")
-    colunas.append("total_km2")
-    for classe in sorted(todas_classes):
-        colunas.append(f"{classe}_pct")
-
-    df = pd.DataFrame(relatorio)[colunas]
-    nome_saida = os.path.join(pasta_segmentos, "relatorio_areas_segmentadas.xlsx")
-    df.to_excel(nome_saida, index=False)
-    print(f"[📄] Relatório salvo em: {nome_saida}")
-
-def verificar_resolucao_raster():
-    modo = questionary.select(
-        "Deseja verificar a resolução de um único raster ou de todos os rasters em uma pasta?",
-        choices=["📄 Analisar um único raster", "📁 Analisar todos os rasters de uma pasta"],
-        style=estilo_personalizado_selecao
-    ).ask()
-
-    resultados = []
-
-    if modo == "📄 Analisar um único raster":
-        raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster para verificar a resolução:")
-        with rasterio.open(raster_path) as src:
-            transform = src.transform
-            res_x, res_y = transform[0], -transform[4]
-        resultados.append((os.path.basename(raster_path), res_x, res_y))
-
-    else:
-        raster_exemplo = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione qualquer raster da pasta desejada:")
-        pasta = os.path.dirname(raster_exemplo)
-        arquivos_tif = [f for f in sorted(os.listdir(pasta)) if f.lower().endswith(".tif")]
-
-        for nome in arquivos_tif:
-            caminho = os.path.join(pasta, nome)
-            try:
-                with rasterio.open(caminho) as src:
-                    transform = src.transform
-                    res_x, res_y = transform[0], -transform[4]
-                resultados.append((nome, res_x, res_y))
-            except:
-                resultados.append((nome, None, None))
-
-    # Exibir resumo
-    print("\n📊 RESUMO DAS RESOLUÇÕES:")
-    for nome, res_x, res_y in resultados:
-        if res_x is not None:
-            print(f"🗂️ {nome} → {res_x:.4f}m x {res_y:.4f}m (área: {res_x * res_y:.4f} m²)")
-        else:
-            print(f"⚠️ {nome} → Erro ao abrir ou ler o raster.")
-
-    alerta_conclusao()
 
 # === Menu principal ===
 def menu():
     exibir_banner()
     opcoes = [
         ("🧠 Treinar modelo", treinar_modelo),
-        ("🧮 Classificar raster (Threads - Modelos leves)", classificar_imagem_thread),
-        ("🧮 Classificar raster (Process - Modelos pesados)", classificar_imagem_pool),
-        ("🧮 Classificar raster em GRUPO", classificar_rasters_segmentados),
+        ("🧮 Classificar raster (individual ou em grupo)", classificar_imagem),
         ("🧼 Limpar ruído", aplicar_filtro_modo),
         ("🧩 Segmentar rasters", segmentar_raster_em_blocos),
         ("🧩 Unificar rasters", unir_rasters_em_mosaico),
