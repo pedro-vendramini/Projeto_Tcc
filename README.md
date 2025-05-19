@@ -1,63 +1,57 @@
-# 🧭 Menu Principal – Estrutura e Funções
+# 🛰️ Classificador de Rasters com Random Forest – TCC UFRR
 
-## 1. 🧠 Treinar modelo
-- **O que faz:** Treina um modelo Random Forest com base em amostras vetoriais (.gpkg) e raster (.tif)
-- **Entrada necessária:**
-  - Arquivo .gpkg com polígonos e classes
-  - Raster .tif com bandas (RGB ou mais)
-  - Nome do campo de classe
-  - Número de árvores
-- **Saída:** Arquivo .pkl do modelo
+Este projeto tem como objetivo realizar a **classificação de uso e ocupação do solo** utilizando **modelos de aprendizado supervisionado** (Random Forest) aplicados a **imagens de satélite** no formato raster.
 
-## 2. 🧮 Classificar raster (Threads - Modelos leves)
-- **O que faz:** Classifica imagem raster usando modelo .pkl com threads (CPU leve)
-- **Entrada:** Modelo .pkl, Raster .tif, Bloco, CPU (%)
-- **Saída:** Raster classificado .tif + relatório .txt
+Desenvolvido como parte do Trabalho de Conclusão de Curso (TCC) no curso de **Engenharia Civil da Universidade Federal de Roraima – UFRR**.
 
-## 3. 🧮 Classificar raster (Process - Modelos pesados)
-- **Igual à anterior**, mas usa multiprocessing (mais eficiente para grandes modelos)
+## 📌 Funcionalidades principais
 
-## 4. 🧮 Classificar raster em GRUPO
-- **O que faz:** Classifica todos os rasters de uma pasta
-- **Entrada:** Modelo .pkl + qualquer raster da pasta
-- **Saída:** Todos classificados em nova pasta
+O script oferece uma interface interativa em terminal para as seguintes ações:
 
-## 5. 🧼 Limpar ruído (Filtro de Modo)
-- **O que faz:** Suaviza ruído aplicando filtro de maioria
-- **Entrada:** Raster .tif + tamanho da janela
-- **Saída:** Novo raster com _modoN
+### 🧠 Treinamento de modelos
+- Treinamento de modelos Random Forest com base em amostras vetoriais (formato GPKG).
+- Extração automática de pixels e geração de modelos `.pkl`.
 
-## 6. 🧩 Segmentar rasters
-- **O que faz:** Divide raster em blocos menores
-- **Entrada:** Raster .tif + tamanho do bloco (px)
-- **Saída:** Blocos .tif em pasta separada
+### 🧮 Classificação de imagens
+- Classificação de uma única imagem ou em lote (pastas segmentadas).
+- Suporte a paralelização com `ThreadPoolExecutor` e `ProcessPoolExecutor`.
+- Geração de relatórios automáticos com tempo, parâmetros e pixels classificados.
 
-## 7. 🧩 Unificar rasters
-- **O que faz:** Junta blocos em um mosaico
-- **Entrada:** Qualquer .tif da pasta + nome do mosaico
-- **Saída:** mosaico.tif
+### 🧩 Segmentação e unificação
+- Segmentação de rasters em blocos de tamanho configurável.
+- Segmentação com base em feições vetoriais.
+- Unificação (mosaico) de rasters em um único arquivo.
 
-## 8. 🔎 Analisar raster
-- **O que faz:** Gera relatório com estatísticas por classe
-- **Entrada:** Raster classificado .tif
-- **Saída:** Relatório .txt com percentuais e áreas
+### 🔎 Análises e verificações
+- Estatísticas por classe (área, percentual, total de pixels).
+- Comparação entre rasters (com percentual de igualdade).
+- Verificação de resolução de imagens em lote.
 
-## 9. 🖼️ Comparar rasters
-- **O que faz:** Compara dois rasters pixel a pixel
-- **Entrada:** Raster 1 + Raster 2
-- **Saída:** Relatório .txt + raster de diferenças opcional
+### 📊 Matrizes de confusão
+- Avaliação da acurácia por raster de referência.
+- Avaliação com base em vetor de amostras.
+- Geração de relatórios com métricas por classe.
 
-## 10. 🧹 Remover banda 4 (imagem RGB)
-- **O que faz:** Remove banda 4 para obter imagem RGB pura
-- **Entrada:** Raster com 4 bandas
-- **Saída:** Raster com 3 bandas (RGB)
+### 🧼 Pós-processamento
+- Filtro de modo para remoção de ruído em rasters classificados.
+- Remoção da 4ª banda (alfa/transparência) de imagens RGB.
 
-## 11. 🧹 Limpar prompt
-- **O que faz:** Limpa a tela e reexibe banner
-
-## 12. ❌ Sair
-- Finaliza o programa
-
-## Desenvolverdor:
+## 👨‍🎓 Sobre o autor
 - Pedro Aguiar Vendramini
-- pedrovendramini.eng@gmail.com
+- Curso de Engenharia Civil – Universidade Federal de Roraima (UFRR)
+- Email: pedrovendramini.eng@gmail.com
+
+---
+
+## 🛠️ Requisitos
+
+### Bibliotecas principais:
+- `numpy`, `pandas`
+- `rasterio`, `geopandas`
+- `scikit-learn`, `joblib`, `scipy`
+- `questionary`, `tqdm`
+
+Instale com:
+
+```bash
+pip install -r requirements.txt

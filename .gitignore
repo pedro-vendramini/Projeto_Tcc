@@ -4,4 +4,5 @@
 
 # Exceto esses dois arquivos:
 !ScriptCompleto.py
+!requirements.txt
 !README.md
