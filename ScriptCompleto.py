@@ -1,3 +1,6 @@
+# ----------------------------
+# 1. IMPORTS
+# ----------------------------
 # === Bibliotecas padrão ===
 import os
 import sys
@@ -51,7 +54,9 @@ estilo_personalizado_selecao = Style([
     ("answer", "bold fg:green"),
 ])
 
-# === Funções utilitárias ===
+# ----------------------------
+# 2. IO / UTILITÁRIOS
+# ----------------------------
 def exibir_banner():
     # Site:https://patorjk.com/software/taag/
 
@@ -169,7 +174,9 @@ def Limpar(banner=True):
 
 ### Funções do programa ###
 
-## Treinar modelo
+# ----------------------------
+# 3. TREINAMENTO
+# ----------------------------
 
 def treinar_modelo():
     vetor_amostras = selecionar_arquivo_com_extensoes([".gpkg"], mensagem="Selecione o arquivo de amostras (GPKG):")
@@ -238,8 +245,9 @@ def treinar_modelo():
     alerta_conclusao()
     print(f"[✔] Modelo salvo com sucesso: {caminho_modelo}")
 
-## Calssificação de imagens
-
+# ----------------------------
+# 4. CLASSIFICAÇÃO
+# ----------------------------
 def configurar_classificacao_individual():
     modelo_path = selecionar_arquivo_com_extensoes([".pkl"], mensagem="Selecione o modelo .pkl treinado:")
     raster_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster a ser classificado (TIF):")
@@ -536,7 +544,9 @@ def classificar_rasters_segmentados():
 
     alerta_conclusao()
 
-## Segmentações e uniões
+# ----------------------------
+# 5. SEGMENTAÇÃO E UNIÃO
+# ----------------------------
 
 def segmentar_raster_em_blocos():
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="🖼️ Selecione o raster a ser segmentado:")
@@ -694,7 +704,10 @@ def segmentar_raster_por_vetor():
     alerta_conclusao()
     print(f"[✔] Segmentos salvos na pasta: {saida_dir}")
 
-## Analises
+# ----------------------------
+# 6. ANALISES
+# ----------------------------
+
 def analisar_raster():
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado para análise estatística:")
 
@@ -920,25 +933,9 @@ def verificar_resolucao_raster():
 
     alerta_conclusao()
 
-def remover_banda_4():
-    nome_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o arquivo TIFF (ex: imagem.tif):")
-    entrada = os.path.abspath(nome_entrada)
-    nome_base, extensao = os.path.splitext(nome_entrada)
-    saida = f"{nome_base}_RGB{extensao}"
-
-    with rasterio.open(entrada) as src:
-        if src.count < 3:
-            raise ValueError("A imagem não possui ao menos 3 bandas (RGB).")
-        profile = src.profile
-        profile.update(count=3)
-        with rasterio.open(saida, 'w', **profile) as dst:
-            for i in range(1, 4):
-                dst.write(src.read(i), i)
-
-    alerta_conclusao()
-    print(f"[✔] Imagem salva sem banda alfa como: {saida}")
-
-## Redução de ruído
+# ----------------------------
+# 7. REMOÇÃO DE RUÍDO
+# ----------------------------
 
 def modo_local(pixels, nodata):
     try:
@@ -1239,7 +1236,9 @@ def aplicar_filtro_modo_lote_por_blocos():
     print(f"[📄] Log salvo em: {caminho_log}")
     print(f"[⏱] Tempo total de execução: {tempo_total}s ({tempo_total // 60} min)")
 
-## Matrizes de confusão
+# ----------------------------
+# 8. MATRIZ DE CONFUSÃO
+# ----------------------------
 
 def gerar_matriz_confusao_raster():
     from sklearn.metrics import confusion_matrix, classification_report, accuracy_score # Importado na função para deixar o inicio mais leve
@@ -1382,8 +1381,30 @@ def gerar_matriz_confusao_vetor():
     alerta_conclusao()
     print(f"\n[💾] Relatório salvo como: {nome_saida}")
 
-## Converter banda 0 para NoData
+# ----------------------------
+# 9. FERRAMENTAS EM GRAL
+# ----------------------------
 
+## Remove banda 4
+def remover_banda_4():
+    nome_entrada = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o arquivo TIFF (ex: imagem.tif):")
+    entrada = os.path.abspath(nome_entrada)
+    nome_base, extensao = os.path.splitext(nome_entrada)
+    saida = f"{nome_base}_RGB{extensao}"
+
+    with rasterio.open(entrada) as src:
+        if src.count < 3:
+            raise ValueError("A imagem não possui ao menos 3 bandas (RGB).")
+        profile = src.profile
+        profile.update(count=3)
+        with rasterio.open(saida, 'w', **profile) as dst:
+            for i in range(1, 4):
+                dst.write(src.read(i), i)
+
+    alerta_conclusao()
+    print(f"[✔] Imagem salva sem banda alfa como: {saida}")
+
+## Converter banda 0 para NoData
 def converter_zeros_para_nodata():
     raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster com valor 0 a ser tratado como NoData:")
     if not raster_path:
@@ -1421,9 +1442,7 @@ def converter_zeros_para_nodata():
     alerta_conclusao()
     print(f"[✔] Raster convertido salvo em: {saida_path}")
 
-
 ## Preencher vazios - Não tá valendo ainda
-
 def modo_local_preencher(pixels, nodata):
     try:
         valores = pixels[pixels != nodata] if nodata is not None else pixels
@@ -1504,6 +1523,9 @@ def preencher_buracos_com_vizinhanca():
     alerta_conclusao()
     print(f"[✅] Raster preenchido salvo em: {caminho_saida}")
 
+# ----------------------------
+# 10. ESTRUTURA DE MENUS
+# ----------------------------
 
 # === Submenus ===
 def submenu(titulo, opcoes):
