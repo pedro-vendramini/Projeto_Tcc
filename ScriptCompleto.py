@@ -937,16 +937,84 @@ def verificar_resolucao_raster():
 # 7. REMOÇÃO DE RUÍDO
 # ----------------------------
 
+def filtrar_bloco_unpack(args):
+    """Desempacota argumentos para filtrar_bloco. Necessário para ProcessPoolExecutor."""
+    return filtrar_bloco(*args)
+
 def modo_local(pixels, nodata):
-    try:
-        valores = pixels[pixels != nodata] if nodata is not None else pixels
-        valores = valores[valores >= 0]  # evita valores negativos para bincount
-        if len(valores) == 0:
-            return nodata if nodata is not None else 0
-        return np.bincount(valores.astype(int)).argmax()
-    except Exception as e:
-        print(f"[⚠️ ERRO modo_local] {e}")
+    valores = pixels[pixels != nodata] if nodata is not None else pixels
+    valores = valores[valores >= 0]
+    if len(valores) == 0:
         return nodata if nodata is not None else 0
+    return np.bincount(valores.astype(int)).argmax()
+
+def filtrar_bloco(raster_path, window, tamanho_janela, nodata):
+    margem = tamanho_janela // 2
+    with rasterio.open(raster_path) as src:
+        # Expande a janela para pegar a margem (com cuidado para não sair dos limites)
+        row_off = max(0, window.row_off - margem)
+        col_off = max(0, window.col_off - margem)
+        height = min(src.height - row_off, window.height + 2*margem)
+        width = min(src.width - col_off, window.width + 2*margem)
+        win_expandida = Window(col_off, row_off, width, height)
+        array = src.read(1, window=win_expandida)
+        
+        # Calcula a fatia da região central (miolo) que corresponde ao bloco original
+        start_row = margem if window.row_off - margem >= 0 else 0
+        start_col = margem if window.col_off - margem >= 0 else 0
+        end_row = start_row + window.height
+        end_col = start_col + window.width
+        bloco_filtrar = array
+        
+        filtrado = generic_filter(
+            bloco_filtrar,
+            lambda p: modo_local(p, nodata),
+            size=tamanho_janela,
+            mode='nearest'
+        )
+        # Só retorna o miolo (parte útil)
+        return (window, filtrado[start_row:end_row, start_col:end_col])
+
+def aplicar_filtro_modo_grande_eficiente():
+    raster_path = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado para aplicar o filtro:")
+    if not raster_path:
+        return
+    tamanho_janela = int(questionary.text("Tamanho da janela (ímpar, ex: 3, 5, 7):", default="3").ask())
+    if tamanho_janela % 2 == 0:
+        print("[⚠] A janela deve ser um número ímpar.")
+        return
+    bloco_pixels = int(questionary.select(
+        "Tamanho do bloco de processamento (px):",
+        choices=["512", "1024", "2048", "4096"], default="1024", style=estilo_personalizado_selecao
+    ).ask())
+    uso_cpu = int(questionary.text(f"Uso da CPU (%):", default="100").ask())
+    total_cores = os.cpu_count() or 1
+    n_proc = max(1, int((uso_cpu / 100) * total_cores))
+    
+    nome_base = os.path.splitext(os.path.basename(raster_path))[0]
+    saida_path = os.path.join(os.path.dirname(raster_path), f"{nome_base}_filtromodo{tamanho_janela}.tif")
+    with rasterio.open(raster_path) as src:
+        profile = src.profile.copy()
+        profile.update(compress='lzw')
+        nodata = src.nodata
+        altura, largura = src.height, src.width
+
+        # Cria as janelas de blocos
+        blocos = []
+        for i in range(0, altura, bloco_pixels):
+            for j in range(0, largura, bloco_pixels):
+                h = min(bloco_pixels, altura - i)
+                w = min(bloco_pixels, largura - j)
+                blocos.append(Window(j, i, w, h))
+
+        with rasterio.open(saida_path, "w", **profile) as dst:
+            args_list = [(raster_path, win, tamanho_janela, nodata) for win in blocos]
+            with ProcessPoolExecutor(max_workers=n_proc) as pool, tqdm(total=len(blocos), desc="Filtrando") as bar:
+                for window, bloco_filtrado in pool.map(filtrar_bloco_unpack, args_list):
+                    dst.write(bloco_filtrado, 1, window=window)
+                    bar.update(1)
+    alerta_conclusao()
+    print(f"[✅] Filtro aplicado. Arquivo salvo em: {saida_path}")
 
 def processar_bloco_vertical(args):
     array, start, end, nodata, tamanho_janela = args
@@ -1576,6 +1644,7 @@ def submenu_limpar_ruido():
     titulo = "🧼 Redução de Ruído - Escolha uma opção:"
     opcoes_submenu = [
         ("📄 Aplicar filtro em um único raster", aplicar_filtro_modo_individual),
+        ("📄 Aplicar filtro em um único raster grande", aplicar_filtro_modo_grande_eficiente),
         ("📁 Aplicar filtro em lote (Paralelo por bloco interno)", aplicar_filtro_modo_lote_por_blocos),
         ("📁 Aplicar filtro em lote (Paralelo por Arquivo)", aplicar_filtro_modo_lote_por_arquivo),
     ]
