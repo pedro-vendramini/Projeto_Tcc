@@ -1375,35 +1375,42 @@ def gerar_matriz_confusao_raster():
         print(f"\n[💾] Relatório salvo como: {nome_saida}")
 
 def gerar_matriz_confusao_vetor():
-    from sklearn.metrics import confusion_matrix, classification_report, accuracy_score # Importado na função para deixar o inicio mais leve
+    from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 
     print("[📊] Gerar matriz de confusão com base em vetor de amostras")
     raster_pred = selecionar_arquivo_com_extensoes([".tif"], mensagem="Selecione o raster classificado (modelo predito):")
     vetor_ref = selecionar_arquivo_com_extensoes([".gpkg"], mensagem="Selecione o arquivo de amostras (GPKG):")
     campo_classe = questionary.text("Nome do campo de classe no vetor:").ask()
 
+    # Abrir raster classificado
     with rasterio.open(raster_pred) as src:
-        perfil = src.profile
-        transform = src.transform
         shape = src.shape
+        transform = src.transform
+        crs = src.crs
         pred_array = src.read(1)
         nodata_pred = src.nodata
 
+    # Abrir e reprojetar vetor, se necessário
     gdf = gpd.read_file(vetor_ref)
+    if gdf.crs != crs:
+        gdf = gdf.to_crs(crs)
+
     gdf = gdf[[campo_classe, "geometry"]].dropna(subset=["geometry"])
 
+    # Rasterizar o vetor com shape e transform do raster
     shapes = ((geom, value) for geom, value in zip(gdf.geometry, gdf[campo_classe]))
     ref_array = rasterize(
         shapes=shapes,
         out_shape=shape,
         transform=transform,
-        fill=-9999,
+        fill=-9999,   # Para áreas sem amostras
         dtype="int32"
     )
 
+    # Máscara válida: só onde existe amostra e o raster não é nodata
     mask_valid = (ref_array != -9999)
     if nodata_pred is not None:
-        mask_valid &= pred_array != nodata_pred
+        mask_valid &= (pred_array != nodata_pred)
 
     y_true = ref_array[mask_valid].flatten()
     y_pred = pred_array[mask_valid].flatten()
@@ -1428,6 +1435,7 @@ def gerar_matriz_confusao_vetor():
     print("\n[🧾] Relatório de Classificação:")
     print(classification_report(y_true, y_pred, labels=labels))
 
+    from datetime import datetime
     data_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     nome_saida = f"matriz_confusao_vetor_{data_str}.txt"
     with open(nome_saida, "w", encoding="utf-8") as f:
